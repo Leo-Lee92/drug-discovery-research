@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import networkx as nx
+from networkx.drawing.nx_agraph import graphviz_layout
 import tensorflow as tf
 import tensorflow_text as text
 # %%
@@ -12,24 +14,79 @@ import tensorflow_text as text
 raw_data = pd.read_csv('/home/messy92/Leo/Drug-discovery-research/data/BindingDB_BindingDB_Inhibition (prep).csv')
 sample_data = raw_data.loc[:, ['Ligand SMILES', 'BindingDB Target Chain Sequence', 'Ki (nM)', 'IC50 (nM)', 'Kd (nM)', 'EC50 (nM)']]
 
-# 단백질과 화합물의 시퀀스 길이 분포 추출
+# %%
+# 길이 분포 플롯팅하기
+# (1) 단백질과 화합물의 시퀀스 길이 분포 추출
 protein_len_distribution = raw_data.apply(lambda x : len(x['BindingDB Target Chain Sequence']), axis = 1)
 compound_len_distribution = raw_data.apply(lambda x : len(x['Ligand SMILES']), axis = 1)
 
-# 단백질의 경우 소수의 너무 긴 단백질이 존재하므로 길이 하위 80% 까지만 고려.
+# (2-1) 단백질의 경우 소수의 너무 긴 단백질이 존재하므로 길이 하위 80% 까지만 고려.
 protein_q80 = protein_len_distribution.quantile(0.8)
 truncated_protein_len_distribution = protein_len_distribution[protein_len_distribution.lt(protein_q80)]
-
-# protein sequence는 길이 하위 80%에 해당하는 샘플만 고려하는 trunc_sample_data 만들어주기
+# (2-2) protein sequence는 길이 하위 80%에 해당하는 샘플만 고려하는 trunc_sample_data 만들어주기
 trunc_sample_data = sample_data[protein_len_distribution.lt(protein_q80)]
 
-# %%
-# 토큰 딕셔너리 만들기
-# token_set = set(''.join(list(trunc_sample_data['Ligand SMILES'])))
-# num_tokens = len(token_set)
-# token_dict = dict(zip(list(range(num_tokens)), sorted(list(token_set))))
+# (3) 길이 데이터 만들기
+# (3-1) protein 길이 데이터 만들기 (시퀀스 대상과 시퀀스 길이를 의미하는 변수로 구성된 2차원 데이터 프레임 만들기)
+protein_len_data = pd.concat([pd.Series(np.repeat("protein", len(truncated_protein_len_distribution))), truncated_protein_len_distribution], axis = 1)
+# (3-2) compound 길이 데이터 만들기 (시퀀스 대상과 시퀀스 길이를 의미하는 변수로 구성된 2차원 데이터 프레임 만들기)
+compound_len_data = pd.concat([pd.Series(np.repeat("compound", len(compound_len_distribution))), compound_len_distribution], axis = 1)
 
-# protein sequence (Amino acids)와 compound sequence (SMILES) 데이터 토큰화
+# (4) 위에서 만든 두 개의 데이터 프레임을 행방향으로 합치기
+sequence_len_dist_data = pd.concat([protein_len_data, compound_len_data], axis = 0)
+sequence_len_dist_data.columns = ['sequence', 'length']
+
+# (5) 풀롯팅 하기
+sns.distplot(sequence_len_dist_data[sequence_len_dist_data.sequence == "protein"]['length'], label = "protein", kde = False, color = 'tab:red')
+sns.distplot(sequence_len_dist_data[sequence_len_dist_data.sequence == "compound"]['length'], label = "compound", kde = False, color = 'tab:blue')
+plt.ylabel('Freqs')
+plt.legend(title = 'Sequence')
+# plt.title('Sequence Length Distribution')
+plt.savefig('/home/messy92/Leo/Drug-discovery-research/images/sequence_length_distribution')
+
+# %%
+# 단백질 - 화합물 네트워크 확인하기
+# (1) 단백질 시퀀스와 화합물 시퀀스를 카테고리 타입 (factorize)으로 변환후 컬럼 추가
+# trunc_sample_data['FASTA Category'] = trunc_sample_data['BindingDB Target Chain Sequence'].astype('category')
+# trunc_sample_data['SMILES Category'] = trunc_sample_data['Ligand SMILES'].astype('category')
+trunc_sample_data['FASTA Category'] = pd.factorize(trunc_sample_data['BindingDB Target Chain Sequence'])[0]
+trunc_sample_data['SMILES Category'] = pd.factorize(trunc_sample_data['Ligand SMILES'])[0]
+trunc_sample_data['connection'] = 1
+
+# (2-1) 단백질-화합물 network matrix (transaction matrix) 만들어주기
+protein_network_matrix = pd.pivot_table(trunc_sample_data, values = 'connection', index = 'SMILES Category', columns = 'FASTA Category', fill_value = 0)
+print(protein_network_matrix.sum(axis=0).sort_values(ascending = False))    # FASTA 별 관련 SMILES 갯수
+
+# (2-2) 단백질 별 활성화 화합물 갯수 플로팅 (The number of bound ligands)
+top_n = 30
+protein_code = protein_network_matrix.sum(axis=0).sort_values(ascending = True).index.astype('str')[-top_n:]
+transaction_freqs = protein_network_matrix.sum(axis=0).sort_values(ascending = True)[-top_n:]
+plt.style.use('ggplot')
+plt.yticks(fontsize = 300/top_n)
+plt.barh(protein_code, transaction_freqs, color = 'tab:red', alpha = 0.5)
+# plt.title('Num of SMILES per FASTA')
+plt.ylabel('Protein code (top ' + str(top_n) + ')')
+plt.xlabel('The number of activating compounds')
+plt.savefig('/home/messy92/Leo/Drug-discovery-research/images/num_bound_ligands')
+
+# (3-1) 화합물-단백질 network matrix (transaction matrix) 만들어주기
+compound_network_matrix = pd.pivot_table(trunc_sample_data, values = 'connection', index = 'FASTA Category', columns = 'SMILES Category', fill_value = 0)
+print(compound_network_matrix.sum(axis=0).sort_values(ascending = False))    # FASTA 별 관련 SMILES 갯수
+
+# (3-2) 화합물 별 표적 단백질 갯수 플로팅 (The number of target proteins)
+top_n = 30
+compound_code = compound_network_matrix.sum(axis=0).sort_values(ascending = True).index.astype('str')[-top_n:]
+transaction_freqs = compound_network_matrix.sum(axis=0).sort_values(ascending = True)[-top_n:]
+plt.style.use('ggplot')
+plt.yticks(fontsize = 300/top_n)
+plt.barh(compound_code, transaction_freqs, color = 'tab:blue', alpha =0.5)
+# plt.title('Num of FASTA per SMILES')
+plt.ylabel('Compounds code (top ' + str(top_n) + ')')
+plt.xlabel('The number of target proteins')
+plt.savefig('/home/messy92/Leo/Drug-discovery-research/images/num_activating_targets')
+
+# %%
+# 단백질 및 화합물의 최대 길이
 protein_max_len = max(trunc_sample_data['BindingDB Target Chain Sequence'].apply(lambda x : len(x)))
 compound_max_len = max(trunc_sample_data['Ligand SMILES'].apply(lambda x : len(x)))
 
@@ -50,26 +107,28 @@ for idx, SMILES in enumerate(trunc_sample_data['Ligand SMILES']):
 SMILES_dat = list(SMILES_dat)
 
 # %%
+# protein sequence (Amino acids)와 compound sequence (SMILES) 데이터 토큰화
+
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
-# 단백질 시퀀스 정수 임베딩
+# (1) 단백질 시퀀스 정수 임베딩
 protein_tokenizer = Tokenizer(filters = ' ', lower = False)
 protein_tokenizer.fit_on_texts(FASTA_dat)
 encoded_FASTA = protein_tokenizer.texts_to_sequences(FASTA_dat)
 padded_FASTA = pad_sequences(encoded_FASTA, maxlen = protein_max_len, padding = 'post')
 
-# 약물 시퀀스 정수 임베딩
+# (2) 약물 시퀀스 정수 임베딩
 compound_tokenizer = Tokenizer(filters = ' ', lower = False)
 compound_tokenizer.fit_on_texts(SMILES_dat)
 encoded_SMILES = compound_tokenizer.texts_to_sequences(SMILES_dat)
 padded_SMILES = pad_sequences(encoded_SMILES, maxlen = compound_max_len, padding = 'post')
 
-# 단백질 및 약물 사전 만들기
+# (3) 단백질 및 약물 사전 만들기
 protein_dict = copy.deepcopy(protein_tokenizer.word_index)
 compound_dict = copy.deepcopy(compound_tokenizer.word_index)
 
-# 데이터 내 전체 unique Protein, unique Compound 갯수 확인
+# (4) 데이터 내 전체 unique Protein, unique Compound 갯수 확인
 _, unq_proteins = np.unique(padded_FASTA, axis = 0, return_counts = True)
 _, unq_compounds = np.unique(padded_SMILES, axis = 0, return_counts = True)
 print('단백질 종류 갯수 : {}'.format(len(unq_proteins)))
@@ -159,3 +218,55 @@ X_test_unq.shape    # Test 데이터 셋의 unique Protein 갯수
 (X_train_unq[:, None] == X_test_unq).all(-1).any(-1).shape
 
 len(np.where((X_train_unq[:, None] == X_test_unq).all(-1).any(-1) == True)[0])
+
+
+
+# %%
+## 여기서 부터 네트워크
+
+all_idx = np.empty([])
+all_code = np.empty([])
+# for i in protein_code[:5]:
+for i in compound_code[:10]:
+    # idx = np.where(np.array(trunc_sample_data['FASTA Category']) == int(i))[0]
+    idx = np.where(np.array(trunc_sample_data['SMILES Category']) == int(i))[0]
+    code = np.repeat(i, len(idx))
+    all_code = np.append(all_code, code)
+    all_idx = np.append(all_idx, idx)
+all_code = all_code[1:]
+all_idx = all_idx[1:].astype('int')
+
+all_idx.sort()
+np.unique(all_code)
+len(all_idx)
+
+tmp_dat = trunc_sample_data[['FASTA Category', 'SMILES Category']].iloc[all_idx]
+
+# %%
+# node의 색깔을 결정하는 property dataframe 만들기
+tmp_protein_code = np.array(tmp_dat['FASTA Category'])
+tmp_compound_code = np.array(tmp_dat['SMILES Category'])
+len_protein_codes = len(np.unique(tmp_protein_code))
+len_compound_codes = len(np.unique(tmp_compound_code))
+
+all_code_ids = np.append(np.unique(tmp_protein_code), np.unique(tmp_compound_code))
+all_code_values = copy.deepcopy(all_code_ids)
+
+all_code_values[np.arange(len_protein_codes)] = 1
+all_code_values[np.arange(len_compound_codes, len(all_code_ids))] = 0
+
+property_dat = pd.DataFrame([all_code_ids, all_code_values]).T
+property_dat.columns = ['IDs', 'values']
+# %%
+# 네트워크 그리기
+G = nx.from_pandas_edgelist(tmp_dat, 'FASTA Category', 'SMILES Category')
+
+# property ㅇㅇㅇ
+property_dat = property_dat.set_index('IDs')
+property_dat.reindex(G.nodes())
+
+fig = plt.figure()
+nx.draw(G, with_labels=True, node_color=property_dat['values'], node_size=75, edge_color='black', linewidths=1, font_size=5, pos = graphviz_layout(G, prog = 'neato'))
+plt.show()
+
+# %%
