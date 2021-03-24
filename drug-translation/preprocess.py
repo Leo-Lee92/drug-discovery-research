@@ -4,7 +4,7 @@ import copy
 import pandas as pd
 import numpy as np
 import tensorflow as tf
-import tensorflow_text as text
+# import tensorflow_text as text
 # %%
 # 데이터 로드
 raw_data = pd.read_csv('/home/messy92/Leo/Drug-discovery-research/data/BindingDB_BindingDB_Inhibition (prep).csv')
@@ -28,20 +28,20 @@ protein_max_len = max(trunc_sample_data['BindingDB Target Chain Sequence'].apply
 compound_max_len = max(trunc_sample_data['Ligand SMILES'].apply(lambda x : len(x)))
 
 # %%
-# 데이터 구축
-# 표적 단백질 시퀀스  (Amino acids sequence represented as FASTA)
-FASTA_dat = np.array(copy.deepcopy(trunc_sample_data['BindingDB Target Chain Sequence']))
-for idx, FASTA in enumerate(trunc_sample_data['BindingDB Target Chain Sequence']):
-    FASTA_dat[idx] = list(FASTA)
+# # 데이터 구축
+# # 표적 단백질 시퀀스  (Amino acids sequence represented as FASTA)
+# FASTA_dat = np.array(copy.deepcopy(trunc_sample_data['BindingDB Target Chain Sequence']))
+# for idx, FASTA in enumerate(trunc_sample_data['BindingDB Target Chain Sequence']):
+#     FASTA_dat[idx] = list(FASTA)
 
-FASTA_dat = list(FASTA_dat)
+# FASTA_dat = list(FASTA_dat)
 
-# 약물 시퀀스 (compound sequence represented as SMILES)
-SMILES_dat = np.array(copy.deepcopy(trunc_sample_data['Ligand SMILES']))
-for idx, SMILES in enumerate(trunc_sample_data['Ligand SMILES']):
-    SMILES_dat[idx] = list(SMILES)
+# # 약물 시퀀스 (compound sequence represented as SMILES)
+# SMILES_dat = np.array(copy.deepcopy(trunc_sample_data['Ligand SMILES']))
+# for idx, SMILES in enumerate(trunc_sample_data['Ligand SMILES']):
+#     SMILES_dat[idx] = list(SMILES)
 
-SMILES_dat = list(SMILES_dat)
+# SMILES_dat = list(SMILES_dat)
 
 # %%
 # protein sequence (Amino acids)와 compound sequence (SMILES) 데이터 토큰화
@@ -49,39 +49,30 @@ SMILES_dat = list(SMILES_dat)
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
+FASTA_dat = trunc_sample_data['BindingDB Target Chain Sequence'].apply(lambda x : ['<bos>'] + list(x) + ['<eos>'])
+SMILES_dat = trunc_sample_data['Ligand SMILES'].apply(lambda x : ['<bos>'] + list(x) + ['<eos>'])
+
 # (1) 단백질 시퀀스 정수 임베딩
 protein_tokenizer = Tokenizer(filters = ' ', lower = False)
 protein_tokenizer.fit_on_texts(FASTA_dat)
 encoded_FASTA = protein_tokenizer.texts_to_sequences(FASTA_dat)
-padded_FASTA = pad_sequences(encoded_FASTA, maxlen = protein_max_len, padding = 'post')
 
 # (2) 약물 시퀀스 정수 임베딩
 compound_tokenizer = Tokenizer(filters = ' ', lower = False)
 compound_tokenizer.fit_on_texts(SMILES_dat)
 encoded_SMILES = compound_tokenizer.texts_to_sequences(SMILES_dat)
-padded_SMILES = pad_sequences(encoded_SMILES, maxlen = compound_max_len, padding = 'post')
 
-# (3) 단백질 및 약물 사전 만들기
+# (3) 단백질, 약물 시퀀스의 최대길이 (BOS, EOS 추가 후)
+protein_maxlen = FASTA_dat.apply(lambda x : len(x)).max()
+compound_maxlen = SMILES_dat.apply(lambda x : len(x)).max()
+
+# (4) 시퀀스 패딩하기
+padded_FASTA = pad_sequences(encoded_FASTA, maxlen = protein_maxlen, padding = 'post')
+padded_SMILES = pad_sequences(encoded_SMILES, maxlen = compound_maxlen, padding = 'post')
+
+# (5) 단백질 및 약물 사전 만들기
 protein_dict = copy.deepcopy(protein_tokenizer.word_index)
-protein_dict['BOS'] = len(protein_dict) + 1
-protein_dict['EOS'] = len(protein_dict) + 1
-
 compound_dict = copy.deepcopy(compound_tokenizer.word_index)
-compound_dict['BOS'] = len(compound_dict) + 1
-compound_dict['EOS'] = len(compound_dict) + 1
-
-# (4) 단백질, 약물 array에 BOS, EOS 추가
-beg_token_FASTA = np.repeat(protein_dict['BOS'], padded_FASTA.shape[0]).reshape((-1, 1))
-end_token_FASTA = np.repeat(protein_dict['EOS'], padded_FASTA.shape[0]).reshape((-1, 1))
-padded_FASTA = np.concatenate((beg_token_FASTA, padded_FASTA, end_token_FASTA), axis = 1)
-
-beg_token_SMILES = np.repeat(compound_dict['BOS'], padded_SMILES.shape[0]).reshape((-1, 1))
-end_token_SMILES = np.repeat(compound_dict['EOS'], padded_SMILES.shape[0]).reshape((-1, 1))
-padded_SMILES = np.concatenate((beg_token_SMILES, padded_SMILES, end_token_SMILES), axis = 1)
-
-# (5) 단백질, 약물 시퀀스의 최대길이
-protein_maxlen = trunc_sample_data['BindingDB Target Chain Sequence'].apply(lambda x : len(x)).max()
-compound_maxlen = trunc_sample_data['Ligand SMILES'].apply(lambda x : len(x)).max()
 
 # (6) 데이터 내 전체 unique Protein, unique Compound 갯수 확인
 _, unq_proteins = np.unique(padded_FASTA, axis = 0, return_counts = True)
@@ -96,6 +87,7 @@ np.random.seed(1234)
 np.random.shuffle(index_list)
 shuffled_FASTA = padded_FASTA[index_list, :]
 shuffled_SMILES = padded_SMILES[index_list, :]
+
 
 # 데이터셋을 training (4)과 test (1)로 5-fold split하기
 from sklearn.model_selection import KFold
@@ -151,7 +143,6 @@ for i in range(num_splits):
     print('Train-Test 데이터 겹치는 SMILES 시퀀스 갯수 : {}'.format(SMILES_intersect_len))    
 
     print('')
- 
 
 
 

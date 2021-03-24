@@ -1,233 +1,226 @@
 # %%
 from utils import *
 # %%
-# Attention Layer
-class MultiHeadAttention(tf.keras.layers.Layer):
-    def __init__(self, **kargs):
-        super(MultiHeadAttention, self).__init__()
-        self.num_heads = kargs['num_heads']
-        self.d_model = kargs['d_model']
+# %%
+# 멀티 헤드 어텐션
+class MultiHeadAttention(tf.keras.Model):        
+    def __init__(self, **kwarg):
+        super().__init__(self)
 
-        assert self.d_model % self.num_heads == 0
-
+        # 하이퍼 파라미터 정의
+        self.d_model = kwargs['d_model']
+        self.num_heads = kwargs['num_heads']
         self.depth = self.d_model // self.num_heads
 
-        self.wq = tf.keras.layers.Dense(kargs['d_model'])
-        self.wk = tf.keras.layers.Dense(kargs['d_model'])
-        self.wv = tf.keras.layers.Dense(kargs['d_model'])
+        # linear projection 함수 : embedding to attnetion 
+        self.wq = tf.keras.layers.Dense(units = self.d_model)
+        self.wk = tf.keras.layers.Dense(units = self.d_model)
+        self.wv = tf.keras.layers.Dense(units = self.d_model)
 
-        self.dense = tf.keras.layers.Dense(kargs['d_model'])
+        # linear proejection 함수 : scaled attention to output
+        self.linear_projection = tf.keras.layers.Dense(units = self.d_model)
 
+    # (linearly-projected) embedding_vector를 head갯수로 나누는 함수
     def split_heads(self, x, batch_size):
-        """Split the last dimension into (num_heads, depth).
-        Transpose the result such that the shape is (batch_size, num_heads, seq_len, depth)
-        """
-        x = tf.reshape(x, (batch_size, -1, self.num_heads, self.depth))
-        return tf.transpose(x, perm=[0, 2, 1, 3])
+        
+        # d_model을 head 갯수로 나눠 depth크기를 만들기 위해서 나머지 모든 차원들은 특정 값으로 고정되어야 함.
+        # 텐서의 축은 (batch_size, sequence_len, d_model) -> (batch_size, num_heads, sequence_len, depth)가 되어야 함
+        # 이를 위해서 batch_size라는 파라미터를 사전에 설정하여 고정해줄 필요가 있음.
 
-    def call(self, v, k, q, mask):
-        batch_size = tf.shape(q)[0]
+        x = tf.reshape(x, shape = (batch_size, -1, self.num_heads, self.depth))
+        return tf.transpose(x, perm = [0, 2, 1, 3])        
 
-        q = self.wq(q)  # (batch_size, seq_len, d_model)
-        k = self.wk(k)  # (batch_size, seq_len, d_model)
-        v = self.wv(v)  # (batch_size, seq_len, d_model)
+    def scaled_dot_product_attention(self, q, k, v, mask):
+        attention_map = tf.matmul(q, k, transpose_b = True) # (batch_size, sequence_length, sequence_legnth)
+        dk = tf.cast(k.shape[1], dtype = tf.float32)
 
-        q = self.split_heads(q, batch_size)  # (batch_size, num_heads, seq_len_q, depth)
-        k = self.split_heads(k, batch_size)  # (batch_size, num_heads, seq_len_k, depth)
-        v = self.split_heads(v, batch_size)  # (batch_size, num_heads, seq_len_v, depth)
+        # scale 적용
+        attention_logits = attention_map / tf.math.sqrt(dk)
 
-        # scaled_attention.shape == (batch_size, num_heads, seq_len_q, depth)
-        # attention_weights.shape == (batch_size, num_heads, seq_len_q, seq_len_k)
-        scaled_attention, attention_weights = scaled_dot_product_attention(
-            q, k, v, mask)
+        # masking 적용
+        if mask is not None:
+            attention_logits += mask
 
-        scaled_attention = tf.transpose(scaled_attention, perm=[0, 2, 1, 3])  # (batch_size, seq_len_q, num_heads, depth)
+        attention_weights = tf.nn.softmax(attention_logits, axis = 3)
+        attention_scores = tf.matmul(attention_weights, v)
+        return attention_scores, attention_weights
 
-        concat_attention = tf.reshape(scaled_attention, 
-                                      (batch_size, -1, self.d_model))  # (batch_size, seq_len_q, d_model)
+    def call(self, query, key, value, mask):
+        # query, key, value는 embedded representation된 문장 데이터들이다.
+        # mask는 미리 뽑아서 여기까지 계속 전달해주어야 함.
 
-        output = self.dense(concat_attention)  # (batch_size, seq_len_q, d_model)
+        # 임베딩 벡터를 linear projection 해주기
+        Q = self.wq(query)
+        K = self.wk(key)
+        V = self.wv(value)
+
+        # linearly projected된 임베딩 벡터를 멀티헤드로 쪼개주기
+        # q, k, v는 (batch, num_heads, seq_len, depth) 4차원임.
+        q = self.split_heads(Q, Q.shape[0])
+        k = self.split_heads(K, K.shape[0])
+        v = self.split_heads(V, V.shape[0])
+
+        # scaled_dot_product_attention 적용해주기
+        scaled_attention_scores, attention_weights = self.scaled_dot_product_attention(q, k, v, mask)
+
+        # self-attention output을 concat해주기
+        scaled_attention_scores = tf.transpose(scaled_attention_scores, perm = [0, 2, 1, 3])
+        scaled_attention_scores = tf.reshape(scaled_attention_scores, shape = (Q.shape[0], -1, self.d_model))
+
+        # concat된 output에 linear-proejction 적용
+        output = self.linear_projection(scaled_attention_scores)
 
         return output, attention_weights
 
-# Position-wise Feed-Forward Networks Layer
-def point_wise_feed_forward_network(**kargs):
-    return tf.keras.Sequential([
-      tf.keras.layers.Dense(kargs['dff'], activation='relu'),  # (batch_size, seq_len, dff)
-      tf.keras.layers.Dense(kargs['d_model'])  # (batch_size, seq_len, d_model)
-    ])
+# 포지션-와이즈 피드포워드 네트워크
+class FeedForwardNetwork(tf.keras.Model):
+    def __init__(self, **kwargs):
+        super().__init__(self)
+        self.d_model = kwargs['d_model']
+        self.d_ff = kwargs['d_ff']
 
-# Encoder Layer
-class EncoderLayer(tf.keras.layers.Layer):
-    def __init__(self, **kargs):
-        super(EncoderLayer, self).__init__()
+        # linear proejection 함수 : normalized scaled attention to output
+        self.linear_projection1 = tf.keras.layers.Dense(units = self.d_ff, activation = 'relu')
+        self.linear_projection2 = tf.keras.layers.Dense(units = self.d_model)
 
-        self.mha = MultiHeadAttention(**kargs)
-        self.ffn = point_wise_feed_forward_network(**kargs)
+    def call(self, x):
+        # 여기서 x는 add & norm 레이어를 통과한 값
+        output = self.linear_projection1(x)
+        output = self.linear_projection2(output)
 
-        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        return output
 
-        self.dropout1 = tf.keras.layers.Dropout(kargs['rate'])
-        self.dropout2 = tf.keras.layers.Dropout(kargs['rate'])
+# 인코더 레이어
+class EncoderLayer(tf.keras.Model):
+    def __init__(self, **kwargs):
+        super().__init__(self)
+
+        self.mha = MultiHeadAttention(**kwargs)
+        self.ffn = FeedForwardNetwork(**kwargs)
+        
+        self.dropout1 = tf.keras.layers.Dropout(rate = kwargs['rate'])
+        self.normalization1 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
+
+        self.dropout2 = tf.keras.layers.Dropout(rate = kwargs['rate'])
+        self.normalization2 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
 
     def call(self, x, mask):
-        attn_output, _ = self.mha(x, x, x, mask)  # (batch_size, input_seq_len, d_model)
-        attn_output = self.dropout1(attn_output)
-        out1 = self.layernorm1(x + attn_output)  # (batch_size, input_seq_len, d_model)
+        mha_outputs, _ = self.mha(x, x, x, mask)
+        mha_outputs = self.dropout1(mha_outputs) + x
+        out1 = self.normalization1(mha_outputs)
 
-        ffn_output = self.ffn(out1)  # (batch_size, input_seq_len, d_model)
-        ffn_output = self.dropout2(ffn_output)
-        out2 = self.layernorm2(out1 + ffn_output)  # (batch_size, input_seq_len, d_model)
+        ffn_outputs = self.ffn(out1)
+        ffn_outputs = self.dropout2(ffn_outputs) + out1
+        out2 = self.normalization2(ffn_outputs)
 
         return out2
 
-# Decoder Layer
-class DecoderLayer(tf.keras.layers.Layer):
-    def __init__(self, **kargs):
-        super(DecoderLayer, self).__init__()
+# 디코더 레이어
+class DecoderLayer(tf.keras.Model):
+    def __init__(self, **kwargs):
+        super().__init__(self)
+        
+        self.mha1 = MultiHeadAttention(**kwargs)
+        self.mha2 = MultiHeadAttention(**kwargs)
+        self.ffn = FeedForwardNetwork(**kwargs)
 
-        self.mha1 = MultiHeadAttention(**kargs)
-        self.mha2 = MultiHeadAttention(**kargs)
+        self.dropout1 = tf.keras.layers.Dropout(rate = kwargs['rate'])
+        self.dropout2 = tf.keras.layers.Dropout(rate = kwargs['rate'])
+        self.dropout3 = tf.keras.layers.Dropout(rate = kwargs['rate'])
 
-        self.ffn = point_wise_feed_forward_network(**kargs)
+        self.normalization1 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
+        self.normalization2 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
+        self.normalization3 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
 
-        self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    def call(self, enc_x, x, dec_pad_mask, dec_subseq_mask):
+        mha_outputs1, attn_weights1 = self.mha1(x, x, x, dec_subseq_mask)
+        mha_outputs1 = self.dropout1(mha_outputs1) + x
+        out1 = self.normalization1(mha_outputs1)
 
-        self.dropout1 = tf.keras.layers.Dropout(kargs['rate'])
-        self.dropout2 = tf.keras.layers.Dropout(kargs['rate'])
-        self.dropout3 = tf.keras.layers.Dropout(kargs['rate'])
-    
-    
-    def call(self, x, enc_output, look_ahead_mask, padding_mask):
-        # enc_output.shape == (batch_size, input_seq_len, d_model)
-        attn1, attn_weights_block1 = self.mha1(x, x, x, look_ahead_mask)  # (batch_size, target_seq_len, d_model)
-        attn1 = self.dropout1(attn1)
-        out1 = self.layernorm1(attn1 + x)
+        mha_outputs2, attn_weights2 = self.mha2(enc_x, enc_x, out1, dec_pad_mask)
+        mha_outputs2 = self.dropout2(mha_outputs2) + out1
+        out2 =  self.normalization2(mha_outputs2)
 
-        attn2, attn_weights_block2 = self.mha2(
-            enc_output, enc_output, out1, padding_mask)  # (batch_size, target_seq_len, d_model)
-        attn2 = self.dropout2(attn2)
-        out2 = self.layernorm2(attn2 + out1)  # (batch_size, target_seq_len, d_model)
+        ffn_outputs = self.ffn(out2)
+        ffn_outputs = self.dropout(ffn_outputs) + out2
+        out3 = self.normalization3(ffn_outputs)
 
-        ffn_output = self.ffn(out2)  # (batch_size, target_seq_len, d_model)
-        ffn_output = self.dropout3(ffn_output)
-        out3 = self.layernorm3(ffn_output + out2)  # (batch_size, target_seq_len, d_model)
-
-        return out3, attn_weights_block1, attn_weights_block2
-
-# Encoder
-class Encoder(tf.keras.layers.Layer):
-    def __init__(self, **kargs):
-        super(Encoder, self).__init__()
-
-        self.d_model = kargs['d_model']
-        self.num_layers = kargs['num_layers']
-
-        self.embedding = tf.keras.layers.Embedding(kargs['input_vocab_size'], self.d_model)
-        self.pos_encoding = positional_encoding(kargs['maximum_position_encoding'], 
-                                                self.d_model)
+        return out3, attn_weights1, attn_weights2
 
 
-        self.enc_layers = [EncoderLayer(**kargs) 
-                           for _ in range(self.num_layers)]
+# 인코더 모듈
+class Encoder(tf.keras.Model):
+    def __init__(self, **kwargs):
+        super().__init__(self)
+        
+        self.d_model = kwargs['d_model']
+        self.enc_dict_len = kwargs['input_vocab_size']
+        self.num_layers = kwargs['num_layers']
+        self.position_encoder = Position_Encoder(**kwargs)
 
-        self.dropout = tf.keras.layers.Dropout(kargs['rate'])
+        self.embedding_layer = tf.keras.layers.Embedding(input_dim = self.enc_dict_len, output_dim = self.d_model)        
+        self.encoder_layer = EncoderLayer(**kwargs)
 
-    def call(self, x, mask):
+        self.stacked_enc_layers = [self.encoder_layer for i in range(self.num_layers)]
 
-        seq_len = tf.shape(x)[1]
+    def call(self, inputs, enc_pad_mask):
+        embeddings = self.embedding_layer(inputs)
+        embeddings *= tf.math.sqrt(tf.cast(self.d_model, dtype = tf.float32))
 
-        # adding embedding and position encoding.
-        x = self.embedding(x)  # (batch_size, input_seq_len, d_model)
-        x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
-        x += self.pos_encoding[:, :seq_len, :]
+        pos = self.position_encoder(embeddings)
+        x = embeddings + pos
 
-        x = self.dropout(x)
+        for enc_layer in self.stacked_enc_layers:
+            x = enc_layer(x, enc_pad_mask)
 
-        for i in range(self.num_layers):
-            x = self.enc_layers[i](x, mask)
+        return x
 
-        return x  # (batch_size, input_seq_len, d_model)
+# 디코더 모듈
+class Decoder(tf.keras.Model):
+    def __init__(self, **kwargs):
+        super().__init__(self)
+        self.d_model = kwargs['d_model']
+        self.dec_dict_len = kwargs['output_vocab_size']
+        self.num_layers = kwargs['num_layers']
 
-# Decoder
-class Decoder(tf.keras.layers.Layer):
-    def __init__(self, **kargs):
-        super(Decoder, self).__init__()
+        self.embedding_layer = tf.keras.layers.Embedding(input_dim = self.d_model, output_dim = self.dec_dict_len)
+        self.position_encoder = Position_Encoder(**kwargs)
+        self.decoder_layer = DecoderLayer(**kwargs)
+        
+        self.stacked_dec_layers = [self.decoder_layer for i in range(self.num_layers)]
 
-        self.d_model = kargs['d_model']
-        self.num_layers = kargs['num_layers']
 
-        self.embedding = tf.keras.layers.Embedding(kargs['target_vocab_size'], self.d_model)
-        self.pos_encoding = positional_encoding(kargs['maximum_position_encoding'], self.d_model)
+    def call(self, enc_x, outputs, dec_pad_mask, dec_seq_mask):
+        attn_weights_dict = {}
+        
+        embeddings = self.embedding_layer(outputs)
+        embeddings *= tf.math.sqrt(self.d_model)
 
-        self.dec_layers = [DecoderLayer(**kargs) 
-                           for _ in range(self.num_layers)]
-        self.dropout = tf.keras.layers.Dropout(kargs['rate'])
+        pos = self.position_encoder(embeddings)
+        x = embeddings + pos
 
-    def call(self, x, enc_output, look_ahead_mask, padding_mask):
-        seq_len = tf.shape(x)[1]
-        attention_weights = {}
+        for i, dec_layer in enumerate(self.stacked_dec_layers):
+            x, attn_w1, attn_w2 = dec_layer(enc_x, x, dec_pad_mask, dec_seq_mask)
+            attn_weights_dict['decoder_layer{}_attn_block1'.format(i+1)] = attn_w1
+            attn_weights_dict['decoder_layer{}_attn_block2'.format(i+1)] = attn_w2
 
-        x = self.embedding(x)  # (batch_size, target_seq_len, d_model)
-        x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
-        x += self.pos_encoding[:, :seq_len, :]
+        return x, attn_weights_dict
 
-        x = self.dropout(x)
-
-        for i in range(self.num_layers):
-            x, block1, block2 = self.dec_layers[i](x, enc_output, look_ahead_mask, padding_mask)
-
-            attention_weights['decoder_layer{}_block1'.format(i+1)] = block1
-            attention_weights['decoder_layer{}_block2'.format(i+1)] = block2
-
-        # x.shape == (batch_size, target_seq_len, d_model)
-        return x, attention_weights
-
-# Transformer
+# 트랜스포머 모델
 class Transformer(tf.keras.Model):
-    def __init__(self, **kargs):
-        super(Transformer, self).__init__(name=kargs['model_name'])
-        self.end_token_idx = kargs['end_token_idx']
+    def __init__(self, **kwargs):
+        super().__init__(self)
         
-        self.encoder = Encoder(**kargs)
-        self.decoder = Decoder(**kargs)
+        self.mask_generator = Mask_Generator(**kwargs)
+        self.encoder = Encoder(**kwargs)
+        self.decoder = Decoder(**kwargs)
+        self.linear_layer = tf.keras.layers.Dense(units = self.d_model, activation = 'softmax')
 
-        self.final_layer = tf.keras.layers.Dense(kargs['target_vocab_size'])
-
-    def call(self, x):
-        inp, tar = x
-
-        enc_padding_mask, look_ahead_mask, dec_padding_mask = create_masks(inp, tar)
-        enc_output = self.encoder(inp, enc_padding_mask)  # (batch_size, inp_seq_len, d_model)
-
-        # dec_output.shape == (batch_size, tar_seq_len, d_model)
-        dec_output, _ = self.decoder(
-            tar, enc_output, look_ahead_mask, dec_padding_mask)
-
-        final_output = self.final_layer(dec_output)  # (batch_size, tar_seq_len, target_vocab_size)
-
-        return final_output
-    
-    def inference(self, x):
-        inp = x
-        tar = tf.expand_dims([STD_INDEX], 0)
-
-        enc_padding_mask, look_ahead_mask, dec_padding_mask = create_masks(inp, tar)        
-        enc_output = self.encoder(inp, enc_padding_mask)
+    def call(self, inputs, outputs):
+        enc_pad_mask, dec_pad_mask, dec_subseq_mask = self.mask_generator(inputs, outputs)
+        enc_outputs = self.encoder(inputs, enc_pad_mask)
+        dec_outputs, attention_weights = self.decoder(enc_outputs, outputs, dec_pad_mask, dec_subseq_mask)
+        final_probs = self.linear_layer(dec_outputs)
         
-        predict_tokens = list()
-        for t in range(0, MAX_SEQUENCE):
-            dec_output, _ = self.decoder(tar, enc_output, look_ahead_mask, dec_padding_mask)
-            final_output = self.final_layer(dec_output)
-            outputs = tf.argmax(final_output, -1).numpy()
-            pred_token = outputs[0][-1]
-            if pred_token == self.end_token_idx:
-                break
-            predict_tokens.append(pred_token)
-            tar = tf.expand_dims([STD_INDEX] + predict_tokens, 0)
-            _, look_ahead_mask, dec_padding_mask = create_masks(inp, tar)
-            
-        return predict_tokens
+        return final_probs
+# %%

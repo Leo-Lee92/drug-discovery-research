@@ -149,3 +149,6 @@ plt.legend(handles=[red_patch, blue_patch], facecolor = 'white', title = "Sequen
 plt.axis('on')
 plt.savefig('/home/messy92/Leo/Drug-discovery-research/images/protein-compound_network.png')
 plt.show()
+# %%
+
+# %%
