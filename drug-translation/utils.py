@@ -72,6 +72,36 @@ class Mask_Generator(tf.keras.Model):
         dec_subsequent_mask = self.subsequent_mask(tar_len)
 
         return enc_padding_mask, dec_padding_mask, dec_subsequent_mask
+
+class Compile_Params(tf.keras.Model):
+    def __init__(self, **kwargs):
+        super().__init__(self)
+        self.optimizer = tf.keras.optimizers.Adam(lr = 1e-3)
+        self.loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits = True, reduction = 'none')
+        self.train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name = 'accuracy')
+
+    # 손실함수 정의
+    def loss(self, real, pred):
+        # padding인 token들 (i.e., 값이 0인 token들)은 무시하는 mask 정의
+        mask = tf.math.logical_not(tf.math.equal(real, 0))  # real 데이터에서 padding이 아닌 부분에만 1값을 마스킹함.
+        loss_ = self.loss_object(real, pred) # SparseCategoricalCrossentropy를 활용하여 loss함수 정의
+       
+        mask = tf.cast(mask, dtype = loss_.dtype)
+        loss_ *= mask
+
+        return tf.reduce_mean(loss_)
+
+    # 평가척도 정의
+    def accuracy(self, real, pred):
+        # padding인 token들 (i.e., 값이 0인 token들)은 무시하는 mask 정의
+        mask = tf.math.logical_not(tf.math.equal(real, 0))
+        mask = tf.expand_dims(tf.cast(mask, dtype = pred.dtype), axis = -1) #  SparseCategoricalAccuracy를 활용하여 평가척도 정의
+        pred *= mask
+        acc = self.train_accuracy(real, pred)
+
+        return tf.reduce_mean(acc)
+    
+
 # %%
 import matplotlib.pyplot as plt
 # 포지션 인코딩 마스크 플롯

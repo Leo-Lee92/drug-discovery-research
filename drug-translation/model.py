@@ -56,16 +56,16 @@ class MultiHeadAttention(tf.keras.Model):
 
         # linearly projected된 임베딩 벡터를 멀티헤드로 쪼개주기
         # q, k, v는 (batch, num_heads, seq_len, depth) 4차원임.
-        q = self.split_heads(Q, Q.shape[0])
-        k = self.split_heads(K, K.shape[0])
-        v = self.split_heads(V, V.shape[0])
+        q = self.split_heads(Q, tf.shape(Q)[0])
+        k = self.split_heads(K, tf.shape(K)[0])
+        v = self.split_heads(V, tf.shape(V)[0])
 
         # scaled_dot_product_attention 적용해주기
         scaled_attention_scores, attention_weights = self.scaled_dot_product_attention(q, k, v, mask)
 
         # self-attention output을 concat해주기
         scaled_attention_scores = tf.transpose(scaled_attention_scores, perm = [0, 2, 1, 3])
-        scaled_attention_scores = tf.reshape(scaled_attention_scores, shape = (Q.shape[0], -1, self.d_model))
+        scaled_attention_scores = tf.reshape(scaled_attention_scores, shape = (tf.shape(Q)[0], -1, self.d_model))
 
         # concat된 output에 linear-proejction 적용
         output = self.linear_projection(scaled_attention_scores)
@@ -98,10 +98,10 @@ class EncoderLayer(tf.keras.Model):
         self.mha = MultiHeadAttention(**kwargs)
         self.ffn = FeedForwardNetwork(**kwargs)
         
-        self.dropout1 = tf.keras.layers.Dropout(rate = kwargs['rate'])
+        self.dropout1 = tf.keras.layers.Dropout(rate = kwargs['dropout_rate'])
         self.normalization1 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
 
-        self.dropout2 = tf.keras.layers.Dropout(rate = kwargs['rate'])
+        self.dropout2 = tf.keras.layers.Dropout(rate = kwargs['dropout_rate'])
         self.normalization2 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
 
     def call(self, x, mask):
@@ -124,9 +124,9 @@ class DecoderLayer(tf.keras.Model):
         self.mha2 = MultiHeadAttention(**kwargs)
         self.ffn = FeedForwardNetwork(**kwargs)
 
-        self.dropout1 = tf.keras.layers.Dropout(rate = kwargs['rate'])
-        self.dropout2 = tf.keras.layers.Dropout(rate = kwargs['rate'])
-        self.dropout3 = tf.keras.layers.Dropout(rate = kwargs['rate'])
+        self.dropout1 = tf.keras.layers.Dropout(rate = kwargs['dropout_rate'])
+        self.dropout2 = tf.keras.layers.Dropout(rate = kwargs['dropout_rate'])
+        self.dropout3 = tf.keras.layers.Dropout(rate = kwargs['dropout_rate'])
 
         self.normalization1 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
         self.normalization2 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
@@ -137,12 +137,12 @@ class DecoderLayer(tf.keras.Model):
         mha_outputs1 = self.dropout1(mha_outputs1) + x
         out1 = self.normalization1(mha_outputs1)
 
-        mha_outputs2, attn_weights2 = self.mha2(enc_x, enc_x, out1, dec_pad_mask)
+        mha_outputs2, attn_weights2 = self.mha2(out1, enc_x, enc_x, dec_pad_mask)
         mha_outputs2 = self.dropout2(mha_outputs2) + out1
         out2 =  self.normalization2(mha_outputs2)
 
         ffn_outputs = self.ffn(out2)
-        ffn_outputs = self.dropout(ffn_outputs) + out2
+        ffn_outputs = self.dropout3(ffn_outputs) + out2
         out3 = self.normalization3(ffn_outputs)
 
         return out3, attn_weights1, attn_weights2
@@ -158,7 +158,7 @@ class Encoder(tf.keras.Model):
         self.num_layers = kwargs['num_layers']
         self.position_encoder = Position_Encoder(**kwargs)
 
-        self.embedding_layer = tf.keras.layers.Embedding(input_dim = self.enc_dict_len, output_dim = self.d_model)        
+        self.embedding_layer = tf.keras.layers.Embedding(input_dim = self.enc_dict_len, output_dim = self.d_model, mask_zero = True)        
         self.encoder_layer = EncoderLayer(**kwargs)
 
         self.stacked_enc_layers = [self.encoder_layer for i in range(self.num_layers)]
@@ -180,10 +180,10 @@ class Decoder(tf.keras.Model):
     def __init__(self, **kwargs):
         super().__init__(self)
         self.d_model = kwargs['d_model']
-        self.dec_dict_len = kwargs['output_vocab_size']
+        self.dec_dict_len = kwargs['target_vocab_size']
         self.num_layers = kwargs['num_layers']
 
-        self.embedding_layer = tf.keras.layers.Embedding(input_dim = self.d_model, output_dim = self.dec_dict_len)
+        self.embedding_layer = tf.keras.layers.Embedding(input_dim = self.dec_dict_len, output_dim = self.d_model, mask_zero = True)
         self.position_encoder = Position_Encoder(**kwargs)
         self.decoder_layer = DecoderLayer(**kwargs)
         
@@ -194,7 +194,7 @@ class Decoder(tf.keras.Model):
         attn_weights_dict = {}
         
         embeddings = self.embedding_layer(outputs)
-        embeddings *= tf.math.sqrt(self.d_model)
+        embeddings *= tf.math.sqrt(tf.cast(self.d_model, dtype = tf.float32))
 
         pos = self.position_encoder(embeddings)
         x = embeddings + pos
@@ -209,18 +209,37 @@ class Decoder(tf.keras.Model):
 # 트랜스포머 모델
 class Transformer(tf.keras.Model):
     def __init__(self, **kwargs):
-        super().__init__(self)
+        super().__init__(self, name = kwargs['model_name'])
         
         self.mask_generator = Mask_Generator(**kwargs)
         self.encoder = Encoder(**kwargs)
         self.decoder = Decoder(**kwargs)
-        self.linear_layer = tf.keras.layers.Dense(units = self.d_model, activation = 'softmax')
+        # self.linear_layer = tf.keras.layers.Dense(units = kwargs['target_vocab_size'], activation = 'softmax')
+        # 굳이 여기서 activation = 'softmax' 하지 말고 loss 함수에서 from_logits = True 해주는게 나음.
+        # 왜냐하면 from_logtis = True가 training 과정에서 numerical stability를 더 보장하기 떄문이다.
+        # 참고 https://stackoverflow.com/questions/57253841/from-logits-true-and-from-logits-false-get-different-training-result-for-tf-loss
 
-    def call(self, inputs, outputs):
+        self.linear_layer = tf.keras.layers.Dense(units = kwargs['target_vocab_size'])
+
+    def call(self, x):
+        inputs, outputs = x
         enc_pad_mask, dec_pad_mask, dec_subseq_mask = self.mask_generator(inputs, outputs)
         enc_outputs = self.encoder(inputs, enc_pad_mask)
         dec_outputs, attention_weights = self.decoder(enc_outputs, outputs, dec_pad_mask, dec_subseq_mask)
-        final_probs = self.linear_layer(dec_outputs)
+        final_outputs = self.linear_layer(dec_outputs)
         
-        return final_probs
+        return final_outputs
+
+    # def inference(self, x):
+    #     dd
 # %%
+model = Transformer(**kwargs)
+cp = Compile_Params(**kwargs)
+model.compile(optimizer = cp.optimizer, loss = cp.loss, metrics = [cp.accuracy])
+model.fit([padded_FASTA[:128, ], padded_SMILES[:128, 0:padded_SMILES.shape[1]-1]], padded_SMILES[:128, 1:], batch_size = 32, epochs = 100)
+# %%
+tf.nn.softmax(model.predict([padded_FASTA[:32, :], padded_SMILES[:32, :padded_SMILES.shape[1] - 1]]), axis = 2)
+tf.math.argmax(tf.nn.softmax(model.predict([padded_FASTA[:1, :], padded_SMILES[:1, :padded_SMILES.shape[1] - 1]]), axis = 2)[0, :, :], axis = 1)
+# %%
+no_train_model = Transformer(**kwargs)
+tf.math.argmax(tf.nn.softmax(no_train_model.predict([padded_FASTA[:32, :], padded_SMILES[:32, :padded_SMILES.shape[1] - 1]]), axis = 2)[31, :, :], axis = 1)

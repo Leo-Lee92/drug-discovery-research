@@ -13,7 +13,8 @@ kwargs = {
     'num_heads' : 8,
     'd_ff' : 2048,
     'input_vocab_size' : protein_vocab_size,
-    'output_vocab_size' : compound_vocab_size,
+    'target_vocab_size' : compound_vocab_size,
     # 'maximum_position_encoding' : MAX_SEQUENCE,
-    'rate' : 0.1
+    'dropout_rate' : 0.1
 }
+# %%
