@@ -76,7 +76,7 @@ class Mask_Generator(tf.keras.Model):
 class Compile_Params(tf.keras.Model):
     def __init__(self, **kwargs):
         super().__init__(self)
-        self.optimizer = tf.keras.optimizers.Adam(lr = 1e-3)
+        self.optimizer = tf.keras.optimizers.Adam(lr = 1e-4)
         self.loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits = True, reduction = 'none')
         self.train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name = 'accuracy')
 
@@ -100,7 +100,15 @@ class Compile_Params(tf.keras.Model):
         acc = self.train_accuracy(real, pred)
 
         return tf.reduce_mean(acc)
-    
+
+# 기타 유틸리티
+def plot_graphs(history, string):
+    plt.plot(history.history[string])
+    # plt.plot(history.history['val_'+string], '')
+    plt.xlabel("Epochs")
+    plt.ylabel(string)
+    # plt.legend([string, 'val_'+string])
+    plt.show()
 
 # %%
 import matplotlib.pyplot as plt

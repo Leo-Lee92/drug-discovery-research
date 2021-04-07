@@ -27,6 +27,11 @@ trunc_sample_data = sample_data[protein_len_distribution.lt(protein_q80)]
 protein_max_len = max(trunc_sample_data['BindingDB Target Chain Sequence'].apply(lambda x : len(x)))
 compound_max_len = max(trunc_sample_data['Ligand SMILES'].apply(lambda x : len(x)))
 
+# 단백질 시퀀스와 화합물 시퀀스를 카테고리 타입 (factorize)으로 변환후 컬럼 추가
+trunc_sample_data['FASTA Category'] = np.array([str('P') + str(i) for i in pd.factorize(trunc_sample_data['BindingDB Target Chain Sequence'])[0].tolist()])
+trunc_sample_data['SMILES Category'] = np.array([str('C') + str(i) for i in pd.factorize(trunc_sample_data['Ligand SMILES'])[0].tolist()])
+trunc_sample_data['connection'] = 1
+
 # %%
 # # 데이터 구축
 # # 표적 단백질 시퀀스  (Amino acids sequence represented as FASTA)
@@ -72,7 +77,10 @@ padded_SMILES = pad_sequences(encoded_SMILES, maxlen = compound_maxlen, padding 
 
 # (5) 단백질 및 약물 사전 만들기
 protein_dict = copy.deepcopy(protein_tokenizer.word_index)
+protein_dict_reverse = dict(map(reversed, protein_dict.items()))
+
 compound_dict = copy.deepcopy(compound_tokenizer.word_index)
+compound_dict_reverse = dict(map(reversed, compound_dict.items()))
 
 # (6) 데이터 내 전체 unique Protein, unique Compound 갯수 확인
 _, unq_proteins = np.unique(padded_FASTA, axis = 0, return_counts = True)

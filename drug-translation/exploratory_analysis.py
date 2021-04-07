@@ -52,16 +52,11 @@ plt.savefig('/home/messy92/Leo/Drug-discovery-research/images/sequence_length_di
 # trunc_sample_data['FASTA Category'] = pd.factorize(trunc_sample_data['BindingDB Target Chain Sequence'])[0]
 # trunc_sample_data['SMILES Category'] = pd.factorize(trunc_sample_data['Ligand SMILES'])[0]
 
-# (1) 단백질 시퀀스와 화합물 시퀀스를 카테고리 타입 (factorize)으로 변환후 컬럼 추가
-trunc_sample_data['FASTA Category'] = np.array([str('P') + str(i) for i in pd.factorize(trunc_sample_data['BindingDB Target Chain Sequence'])[0].tolist()])
-trunc_sample_data['SMILES Category'] = np.array([str('C') + str(i) for i in pd.factorize(trunc_sample_data['Ligand SMILES'])[0].tolist()])
-trunc_sample_data['connection'] = 1
-
-# (2-1) 단백질-화합물 network matrix (transaction matrix) 만들어주기
+# (1-1) 단백질-화합물 network matrix (transaction matrix) 만들어주기
 protein_network_matrix = pd.pivot_table(trunc_sample_data, values = 'connection', index = 'SMILES Category', columns = 'FASTA Category', fill_value = 0)
 print(protein_network_matrix.sum(axis=0).sort_values(ascending = False))    # FASTA 별 관련 SMILES 갯수
 
-# (2-2) 단백질 별 활성화 화합물 갯수 플로팅 (The number of bound ligands)
+# (1-2) 단백질 별 활성화 화합물 갯수 플로팅 (The number of bound ligands)
 top_n = 30
 protein_code = protein_network_matrix.sum(axis=0).sort_values(ascending = True).index.astype('str')[-top_n:]
 transaction_freqs = protein_network_matrix.sum(axis=0).sort_values(ascending = True)[-top_n:]
@@ -73,11 +68,11 @@ plt.ylabel('Protein code (top ' + str(top_n) + ')')
 plt.xlabel('The number of bound ligands')
 plt.savefig('/home/messy92/Leo/Drug-discovery-research/images/num_bound_ligands')
 
-# (3-1) 화합물-단백질 network matrix (transaction matrix) 만들어주기
+# (2-1) 화합물-단백질 network matrix (transaction matrix) 만들어주기
 compound_network_matrix = pd.pivot_table(trunc_sample_data, values = 'connection', index = 'FASTA Category', columns = 'SMILES Category', fill_value = 0)
 print(compound_network_matrix.sum(axis=0).sort_values(ascending = False))    # FASTA 별 관련 SMILES 갯수
 
-# (3-2) 화합물 별 표적 단백질 갯수 플로팅 (The number of target proteins)
+# (2-2) 화합물 별 표적 단백질 갯수 플로팅 (The number of target proteins)
 top_n = 30
 compound_code = compound_network_matrix.sum(axis=0).sort_values(ascending = True).index.astype('str')[-top_n:]
 transaction_freqs = compound_network_matrix.sum(axis=0).sort_values(ascending = True)[-top_n:]
@@ -93,17 +88,19 @@ plt.savefig('/home/messy92/Leo/Drug-discovery-research/images/num_activating_tar
 # 네트워크 플롯팅
 # 참고 1: https://www.python-graph-gallery.com/network-chart/
 # 참고 2: https://networkx.org/documentation/latest/_downloads/networkx_reference.pdf
-top_n = 30
+top_n = 10
+# edge_n = 20
 protein_code = protein_network_matrix.sum(axis=0).sort_values(ascending = True).index.astype('str')[-top_n:]
 compound_code = compound_network_matrix.sum(axis=0).sort_values(ascending = True).index.astype('str')[-top_n:]
 
 all_idx = np.empty([])
 all_code = np.empty([])
 
-# for i in protein_code[:top_n]:
-for i in compound_code[:top_n]:
-    # idx = np.where(np.array(trunc_sample_data['FASTA Category']) == i)[0]
-    idx = np.where(np.array(trunc_sample_data['SMILES Category']) == i)[0]
+for i in protein_code[:top_n]:
+# for i in compound_code[:top_n]:
+    idx = np.where(np.array(trunc_sample_data['FASTA Category']) == i)[0]
+    # idx = np.where(np.array(trunc_sample_data['SMILES Category']) == i)[0]
+    idx = np.random.choice(idx, size = len(idx), replace = False)
     code = np.repeat(i, len(idx))
     all_code = np.append(all_code, code)    # 코드의 str값을 담은 array
     all_idx = np.append(all_idx, idx)       # 각 코드에 해당하는 index값을 담은 array
