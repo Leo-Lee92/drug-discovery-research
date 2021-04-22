@@ -5,90 +5,40 @@ import pandas as pd
 import numpy as np
 import tensorflow as tf
 # import tensorflow_text as text
+
+# GPU 할당
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+  # 텐서플로가 첫 번째 GPU만 사용하도록 제한
+  try:
+    tf.config.experimental.set_visible_devices(gpus[1], 'GPU')
+  except RuntimeError as e:
+    # 프로그램 시작시에 접근 가능한 장치가 설정되어야만 합니다
+    print(e)
 # %%
-# 데이터 로드
-raw_data = pd.read_csv('/home/messy92/Leo/Drug-discovery-research/data/BindingDB_BindingDB_Inhibition (prep).csv')
-sample_data = raw_data.loc[:, ['Ligand SMILES', 'BindingDB Target Chain Sequence', 'Ki (nM)', 'IC50 (nM)', 'Kd (nM)', 'EC50 (nM)']]
+# 데이터 로드 (Prep)
+sample_data = data_loader('/home/messy92/Leo/Drug-discovery-research/data/BindingDB_BindingDB_Inhibition (prep).csv', task = "generation")
 
-# %%
-# 데이터 샘플링
-# (1) 단백질과 화합물의 시퀀스 길이 분포 추출
-protein_len_distribution = raw_data.apply(lambda x : len(x['BindingDB Target Chain Sequence']), axis = 1)
-compound_len_distribution = raw_data.apply(lambda x : len(x['Ligand SMILES']), axis = 1)
+# 데이터 절삭 (Prep)
+truncated_data = len_based_truncation(sample_data, truncate_rate = 0.2)
 
-# (2-1) 단백질의 경우 소수의 너무 긴 단백질이 존재하므로 길이 하위 80% 까지만 고려.
-protein_q80 = protein_len_distribution.quantile(0.8)
-truncated_protein_len_distribution = protein_len_distribution[protein_len_distribution.lt(protein_q80)]
-# (2-2) protein sequence는 길이 하위 80%에 해당하는 샘플만 고려하는 trunc_sample_data 만들어주기
-trunc_sample_data = sample_data[protein_len_distribution.lt(protein_q80)]
+# 노드 생성 (Prep)
+truncated_data, a_code, b_code = node_generation(truncated_data, task = "generation")
 
-# %%
-# 단백질 및 화합물의 최대 길이
-protein_max_len = max(trunc_sample_data['BindingDB Target Chain Sequence'].apply(lambda x : len(x)))
-compound_max_len = max(trunc_sample_data['Ligand SMILES'].apply(lambda x : len(x)))
+# 토크나이징 (Prep)
+a_sequence, b_sequence, a_dict, b_dict = data_tokenizer(truncated_data)
 
-# 단백질 시퀀스와 화합물 시퀀스를 카테고리 타입 (factorize)으로 변환후 컬럼 추가
-trunc_sample_data['FASTA Category'] = np.array([str('P') + str(i) for i in pd.factorize(trunc_sample_data['BindingDB Target Chain Sequence'])[0].tolist()])
-trunc_sample_data['SMILES Category'] = np.array([str('C') + str(i) for i in pd.factorize(trunc_sample_data['Ligand SMILES'])[0].tolist()])
-trunc_sample_data['connection'] = 1
+# 노드 갯수 확인 (EDA)
+num_a_nodes, maxlen_a, num_b_nodes, maxlen_b = check_node_num(a_sequence, b_sequence)
 
-# %%
-# # 데이터 구축
-# # 표적 단백질 시퀀스  (Amino acids sequence represented as FASTA)
-# FASTA_dat = np.array(copy.deepcopy(trunc_sample_data['BindingDB Target Chain Sequence']))
-# for idx, FASTA in enumerate(trunc_sample_data['BindingDB Target Chain Sequence']):
-#     FASTA_dat[idx] = list(FASTA)
 
-# FASTA_dat = list(FASTA_dat)
 
-# # 약물 시퀀스 (compound sequence represented as SMILES)
-# SMILES_dat = np.array(copy.deepcopy(trunc_sample_data['Ligand SMILES']))
-# for idx, SMILES in enumerate(trunc_sample_data['Ligand SMILES']):
-#     SMILES_dat[idx] = list(SMILES)
 
-# SMILES_dat = list(SMILES_dat)
 
 # %%
-# protein sequence (Amino acids)와 compound sequence (SMILES) 데이터 토큰화
-
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-
-FASTA_dat = trunc_sample_data['BindingDB Target Chain Sequence'].apply(lambda x : ['<bos>'] + list(x) + ['<eos>'])
-SMILES_dat = trunc_sample_data['Ligand SMILES'].apply(lambda x : ['<bos>'] + list(x) + ['<eos>'])
-
-# (1) 단백질 시퀀스 정수 임베딩
-protein_tokenizer = Tokenizer(filters = ' ', lower = False)
-protein_tokenizer.fit_on_texts(FASTA_dat)
-encoded_FASTA = protein_tokenizer.texts_to_sequences(FASTA_dat)
-
-# (2) 약물 시퀀스 정수 임베딩
-compound_tokenizer = Tokenizer(filters = ' ', lower = False)
-compound_tokenizer.fit_on_texts(SMILES_dat)
-encoded_SMILES = compound_tokenizer.texts_to_sequences(SMILES_dat)
-
-# (3) 단백질, 약물 시퀀스의 최대길이 (BOS, EOS 추가 후)
-protein_maxlen = FASTA_dat.apply(lambda x : len(x)).max()
-compound_maxlen = SMILES_dat.apply(lambda x : len(x)).max()
-
-# (4) 시퀀스 패딩하기
-padded_FASTA = pad_sequences(encoded_FASTA, maxlen = protein_maxlen, padding = 'post')
-padded_SMILES = pad_sequences(encoded_SMILES, maxlen = compound_maxlen, padding = 'post')
-
-# (5) 단백질 및 약물 사전 만들기
-protein_dict = copy.deepcopy(protein_tokenizer.word_index)
-protein_dict_reverse = dict(map(reversed, protein_dict.items()))
-
-compound_dict = copy.deepcopy(compound_tokenizer.word_index)
-compound_dict_reverse = dict(map(reversed, compound_dict.items()))
-
-# (6) 데이터 내 전체 unique Protein, unique Compound 갯수 확인
-_, unq_proteins = np.unique(padded_FASTA, axis = 0, return_counts = True)
-_, unq_compounds = np.unique(padded_SMILES, axis = 0, return_counts = True)
-print('단백질 종류 갯수 : {}'.format(len(unq_proteins)))
-print('화합물 종류 갯수 : {}'.format(len(unq_compounds)))
-
-# %%
+'''
+여기서부턴 좀 나중에 코드 정리 해주기
+'''
 # 데이터 셔플링해주기
 index_list = np.arange(len(padded_FASTA))
 np.random.seed(1234)

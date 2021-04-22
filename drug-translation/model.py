@@ -9,34 +9,86 @@ from utils import *
 class BipartiteGraphConvolution(tf.keras.Model):
     def __init__(self, **kwargs):
         super().__init__(self)
-        self.mlb = MultiLabelBinarizer()
+        # self.mlb = MultiLabelBinarizer()
         self.pooling = kwargs['pooling']
         self.d_bgc = kwargs['d_bgc']
 
+    # # 근접행렬 생성함수
+    # def incidence_matrix_generator(self, node_batch):
+    #     # 노드 종류
+    #     print('node_batch :', node_batch)
+    #     unique_nodes = tf.unique(node_batch)[0]
+    #     print('unique_nodes :', unique_nodes)
+
+    #     # 노드 리스트 - 엣지 어레이 (list of arrays 구조)
+    #     index_per_unique_nodes = list(map(lambda x : np.concatenate(tf.where(node_batch == x).numpy()), unique_nodes))
+
+    #     # Note. 아래의 코드는 sklearn.preprocessing 라이브러리의 MultilabelBinarizer를 활용 (참조: https://stackoverflow.com/questions/52189126/how-to-elegantly-one-hot-encode-a-series-of-lists-in-pandas)
+    #     ## incidence_matrix의 차원 : (num_node, batch_size)
+    #     index_per_unique_nodes = pd.Series(index_per_unique_nodes)  
+    #     incidence_matrix = pd.DataFrame(self.mlb.fit_transform(index_per_unique_nodes), columns=self.mlb.classes_, index=index_per_unique_nodes.index) 
+    #     incidence_matrix = np.array(incidence_matrix)
+    #     print('incidence_matrix :', incidence_matrix)
+
+    #     return unique_nodes, incidence_matrix
+
+    # numpy array에서 indexing 하듯이 tensor-graph에도 적용해주는 함수
+    def numpy_like_indexing(self, data, target_index, axis = 0):
+        # axis = 0이면 row에 대한 indexing, axis = 1이면 col에 대한 indexing
+
+        if axis == 0:
+            data = data[target_index, :]
+        elif axis == 1:
+            data = data[:, target_index]
+
+        return data
+
     # 근접행렬 생성함수
-    def incidence_matrix_generator(self, node_batch):
-        # 노드 종류
-        unique_nodes = tf.unique(node_batch)[0]
+    def incidence_matrix_generator(self, a_node, b_node):
 
-        # 노드 리스트 - 엣지 어레이 (list of arrays 구조)
-        index_per_unique_nodes = list(map(lambda x : np.concatenate(tf.where(node_batch == x).numpy()), unique_nodes))
+        ## a_incidence의 차원 : (num_node_in_a, batch_size)
+        ## a_target_indices 차원 : (num_node_in_a (activated), ) - 주어진 배치에서 활성화된 노드의 갯수를 row의 갯수로 가짐
+        a_incidence = tf.transpose(a_node)
+        a_target_indices = tf.squeeze(tf.where(tf.reduce_sum(a_incidence, axis = 1) > 0))
+        num_a_nodes_per_batch = tf.shape(a_target_indices)[0]
 
-        # Note. 아래의 코드는 sklearn.preprocessing 라이브러리의 MultilabelBinarizer를 활용 (참조: https://stackoverflow.com/questions/52189126/how-to-elegantly-one-hot-encode-a-series-of-lists-in-pandas)
-        ## incidence_matrix의 차원 : (num_node, batch_size)
-        index_per_unique_nodes = pd.Series(index_per_unique_nodes)  
-        incidence_matrix = pd.DataFrame(self.mlb.fit_transform(index_per_unique_nodes), columns=self.mlb.classes_, index=index_per_unique_nodes.index) 
-        incidence_matrix = np.array(incidence_matrix)
+        ## b_incidence의 차원 : (num_node_in_b, batch_size)
+        ## b_target_indices 차원 : (num_node_in_b (activated), )
+        b_incidence = tf.transpose(b_node)
+        b_target_indices = tf.squeeze(tf.where(tf.reduce_sum(b_incidence, axis = 1) > 0))
+        num_b_nodes_per_batch = tf.shape(b_target_indices)[0]
 
-        return unique_nodes, incidence_matrix
+        ## a_incidence_active의 차원 : (num_node_in_a (activated), batch_size)
+        ## b_incidence_active의 차원 : (num_node_in_a (activated), batch_size)
+        a_incidence_active = tf.numpy_function(self.numpy_like_indexing, (a_incidence, a_target_indices, 0), Tout = tf.float32)
+        b_incidence_active = tf.numpy_function(self.numpy_like_indexing, (b_incidence, b_target_indices, 0), Tout = tf.float32)
+
+        ## bipartite_incidence의 차원 : (num_node_in_a (activated) + num_node_in_b (activated), batch_size)
+        bipartite_incidence = tf.concat([a_incidence_active, b_incidence_active], axis = 0)
+
+        return bipartite_incidence, num_a_nodes_per_batch, num_b_nodes_per_batch
 
     def convolution(self, bipartite_incidence, attention_map, pooling):
-        bipartite_incidence = tf.cast(bipartite_incidence, dtype = tf.float32).numpy()
+        # bipartite_incidence = tf.cast(bipartite_incidence, dtype = tf.float32).numpy()
+        bipartite_incidence = tf.cast(bipartite_incidence, dtype = tf.float32)
 
         # Bi-incidence 행렬 생성
         ## average_weighted incidence matrix
         if pooling == "mean":       # average pooling
             num_edges_per_node = tf.reduce_sum(bipartite_incidence, axis = 1)
+
             bipartite_incidence *= 1 / tf.reshape(num_edges_per_node, shape = (-1, 1))
+
+            # # 만약 bipartite_incidence 행렬에 nan 값이 하나라도 존재한다면
+            # if tf.not_equal(tf.size(tf.where(tf.math.is_nan(bipartite_incidence) == True)), 0):
+            #     # 1/0 = inf -> nan이 문제가 될 경우 아래와 같이 처리해야 함.
+            #     # nan값을 0으로 replace해주기 ㅠㅠ self.degree_factor 활용해도 될 듯. 
+            #     # 아니면 그냥 tf.math.nan 해서 True에 해당하는 index는 0, 나머지는 1인 벡터 만들어서 곱해주던가.
+            #     nan_indices = tf.where(tf.math.is_nan(bipartite_incidence) == True)
+            #     update_values = tf.zeros(tf.shape(tf.squeeze(nan_indices))[0])
+            #     bipartite_incidence = tf.tensor_scatter_nd_update(bipartite_incidence, nan_indices, update_values)
+            #     print('bipartite_incidence 2:', bipartite_incidence)
+
 
         ## max_cut incidence matrix
         ## frobenius norm이 각 attention score 행렬에 담김 총 정보의 양을 대표한다고 간주
@@ -49,7 +101,11 @@ class BipartiteGraphConvolution(tf.keras.Model):
             ## normalized_attention_map 차원 : (batch_size, sequence_len1, sequence_len2)
             # (1) linear 정규화의 경우
             denom = tf.reduce_sum(attention_map, axis = 2)
+            print('denom :', denom)
+
             normalized_attention_map = attention_map / tf.expand_dims(denom, axis = 2)
+            print('normalized_attention_map :', normalized_attention_map)
+
             # (2) softmax 정규화의 경우 
             # normalized_attention_map = tf.nn.softmax(attention_map)
 
@@ -58,7 +114,10 @@ class BipartiteGraphConvolution(tf.keras.Model):
             ## bipartite_incidence의 차원 : (num_node_in_a + num_node_in_b, batch_size)
             ## frobenius_norm_mat의 차원 : (num_node_in_a + num_node_in_b, batch_size)
             frobenius_norm_vec = tf.norm(normalized_attention_map, ord = 'fro', axis = (1, 2))
+            print('frobenius_norm_vec :', frobenius_norm_vec)
+
             frobenius_norm_mat = bipartite_incidence * tf.expand_dims(frobenius_norm_vec, axis = 0)
+            print('frobenius_norm_mat :', frobenius_norm_mat)
 
             ## maxval_edge_idx_vec의 차원 : (num_node_in_a + num_node_in_b, )
             ## maxval_edge_idx_mat 차원 : (num_node_in_a + num_node_in_b, batch_size)
@@ -69,30 +128,39 @@ class BipartiteGraphConvolution(tf.keras.Model):
 
             bipartite_incidence = maxval_edge_idx_mat
 
+        ## bipartite_incidence 차원 : (num_node_in_a + num_node_in_b, batch_size)
+        ## attention_map의 차원 : (batch_size, sequence_len1, sequence_len2)
         ## conv_incidence의 차원 : (num_node_in_a + num_node_in_b, sequence_len1, sequence_len2)
         conv_incidence = tf.tensordot(bipartite_incidence, attention_map, axes = [[1], [0]])
-        print('conv_incidence :', conv_incidence)
-
-        # flat_conv_incidence = tf.reshape(conv_incidence, shape = (conv_incidence.shape[0], -1))
-
+        # print('conv_incidence :', conv_incidence)
         return conv_incidence
 
-    def call(self, a_partition, b_partition, attention_map):
-        # a_partition : source domain을 구성하는 nodes set
-        # b_partition : target domain을 구성하는 nodes set (예. trunc_sample['Ligand SMILES'])
+    def call(self, a_node, b_node, attention_map):
+        # a_node : source domain을 구성하는 nodes set
+        # b_node : target domain을 구성하는 nodes set (예. trunc_sample['Ligand SMILES'])
+        ## a_node의 차원 : (batch_size, num_node_in_a)
+        ## b_node의 차원 : (batch_size, num_node_in_b)
 
-        # incidence_matrix 생성
-        a_nodeVec, a_incidence = self.incidence_matrix_generator(a_partition)
-        b_nodeVec, b_incidence = self.incidence_matrix_generator(b_partition)
+        # # incidence_matrix 생성 ver1
+        # a_node = tf.reshape(a_node, shape = [-1])
+        # b_node = tf.reshape(b_node, shape = [-1])
+        # a_nodeVec, a_incidence = self.incidence_matrix_generator(a_node)
+        # b_nodeVec, b_incidence = self.incidence_matrix_generator(b_node)
 
         # incidence_matrix 이어 붙여서 bipartite_incidence_matrix 생성
         ## bipartite_incidence의 차원 : (num_node_in_a + num_node_in_b, batch_size)
-        bipartite_incidence = tf.concat([a_incidence, b_incidence], axis = 0)
+        # bipartite_incidence = tf.concat([a_incidence, b_incidence], axis = 0)
+
+        # incidence_matrix 생성 ver2
+        # a_node의 차원 : (num_node_in_a + num_node_in_b, batch_size)
+        # b_node의 차원 : (num_node_in_a + num_node_in_b, batch_size)
+        bipartite_incidence, num_a_nodes_per_batch, num_b_nodes_per_batch = self.incidence_matrix_generator(a_node, b_node)
 
         # bipartite_graph_convolution 수행
         out = self.convolution(bipartite_incidence, attention_map, self.pooling)
+        # print('out :', out)
 
-        return out, bipartite_incidence, a_nodeVec, b_nodeVec
+        return out, bipartite_incidence, num_a_nodes_per_batch, num_b_nodes_per_batch
 
 class SignlessLaplacianPropagation(tf.keras.Model):
     def __init__(self, **kwargs):
@@ -102,6 +170,20 @@ class SignlessLaplacianPropagation(tf.keras.Model):
         self.bgc_operator = BipartiteGraphConvolution(**kwargs)
         self.hop = kwargs['num_hop']
         self.normalized = kwargs['normalized_laplacian']
+        self.degree_factor = kwargs['degree_factor']
+
+    def node_square_zero_indexing(self, node_index_array, adjacency_mat):
+        node_index_list = list(node_index_array)
+        node_square_index_list = [[node_i, node_j] for node_i in node_index_array for node_j in node_index_array]
+        zero_tensor = tf.zeros_like(node_square_index_list, dtype = tf.float32)[:, 0]
+        zero_indexed_adjacency_mat = tf.tensor_scatter_nd_update(tensor = adjacency_mat, indices = node_square_index_list, updates = zero_tensor)
+
+        return zero_indexed_adjacency_mat
+
+    def make_zero_entry_block(self, node_index_list, adjacency_matrix):
+        adjacency_matrix[node_index_list, node_index_list] = 0 
+        
+        return adjacency_matrix
 
     def multihop_operator(self, adjacency_mat, hop):
         # (참고) bipartite graph 특성상 hop을 홀수 (odd)로 해야 함. 왜냐하면 짝수 (even) hop일 경우 최종적으로 같은 partition에 속한 node와의 연결을 반영하게 됨.
@@ -109,38 +191,41 @@ class SignlessLaplacianPropagation(tf.keras.Model):
         # hop 갯수만큼 인접행렬의 내적을 누적시키는 adjacency_mat_op 변수 정의
         adjacency_mat_op = adjacency_mat
 
-        # (hop - 1) 번 for문이 iter 돌면 hop갯수만큼 adjacency를 내적한 셈이됨.
-        ## iter = 1에서 adjacency_mat_op과 adjacency_mat가 내적되어 hop = 2를 의미함.
+        # for문이 (hop - 1) 번 iter 돌면 hop갯수만큼 adjacency를 내적한 셈이됨.
+        ## iter = 0에서 adjacency_mat_op과 adjacency_mat가 내적되어 hop = 1를 의미함.
         ## 고로 iter + 1 = hop
-        for i in range(hop - 1):     
-            adjacency_mat_op = tf.tensordot(adjacency_mat_op, adjacency_mat, axes = [[1], [0]])
+        if hop > 1:
+            for i in range(hop):
+                adjacency_mat_op = tf.tensordot(adjacency_mat_op, adjacency_mat, axes = [[1], [0]])
 
         return adjacency_mat_op
 
     # biadjacency 행렬 생성
-    def bipartite_adjacency_matrix_generator(self, bi_incidence, a_nodeVec, b_nodeVec, hop):
+    def bipartite_adjacency_matrix_generator(self, bi_incidence, num_a_nodes, num_b_nodes, hop):
         # biadjacency 행렬을 만들기 위해선 bi_incidence 행렬을 자기 자신의 전치행렬과 내적한 뒤 특정 block을 0값으로 할당하면 됨.
 
         # (1) 내적행렬 계산
         ## 내적행렬의 차원 : (num_node_in_a + num_node_in_b, num_node_in_a + num_node_in_b)
-        bi_incidence_dop_product = tf.matmul(bi_incidence, bi_incidence, transpose_b = True)
+        bi_incidence_dot_product = tf.matmul(bi_incidence, bi_incidence, transpose_b = True)
 
         # (2) batch별로 각 partition에 존재하는 노드의 인덱스 정의
-        num_node_in_a = len(a_nodeVec)
-        num_node_in_b = len(b_nodeVec)
-        node1_idx = np.array(range(num_node_in_a))
-        node2_idx = np.array(range(num_node_in_a, num_node_in_b + num_node_in_a))
+        node1_idx = tf.range(num_a_nodes)
+        node2_idx = tf.range(num_a_nodes, num_a_nodes + num_b_nodes)
 
         # (3) 내적행렬에서 같은 partition에 속한 노드간 관계를 의미하는 블록에 0값 할당
         ## 블록 1의 차원 : (num_node_in_a, num_node_in_a)
         ## 블록 2의 차원 : (num_node_in_b, num_node_in_b)
-        adjacency_mat = bi_incidence_dop_product.numpy()
-        adjacency_mat[node1_idx, node1_idx] = 0
-        adjacency_mat[node2_idx, node2_idx] = 0
+        adjacency_mat = tf.numpy_function(self.make_zero_entry_block, (node1_idx, bi_incidence_dot_product), Tout = tf.float32)
+        adjacency_mat = tf.numpy_function(self.make_zero_entry_block, (node2_idx, adjacency_mat), Tout = tf.float32)
+
+        # adjacency_mat = bi_incidence_dot_product.numpy()
+        # adjacency_mat[node1_idx, node1_idx] = 0             # 블록 1
+        # adjacency_mat[node2_idx, node2_idx] = 0             # 블록 2
 
         # (Optional) Multi-hop adjacency matrix 연산
-        if hop > 1:
-            adjacency_mat = self.multihop_operator(adjacency_mat, hop)
+        # if hop > 1:
+        #     adjacency_mat = self.multihop_operator(adjacency_mat, hop)
+        adjacency_mat = self.multihop_operator(adjacency_mat, hop)
 
         return tf.cast(adjacency_mat, dtype = tf.float32)
 
@@ -148,8 +233,19 @@ class SignlessLaplacianPropagation(tf.keras.Model):
     def bipartite_degree_matrix_generator(self, bipartite_adjacency_mat, normalized):
 
         # degree_vec은 각 요소들이 해당 node의 degree인 벡터
+        ## degree_vec의 차원 (num_node_in_a + num_node_in_b, 1)
         degree_vec = tf.reshape(tf.reduce_sum(bipartite_adjacency_mat, axis = 1), shape = (-1, 1))
         degree_vec = tf.cast(degree_vec, dtype = tf.float32)
+
+        # # degree_factor를 활용하여 최소 degree 정의 
+        # ## degree = 0 일경우 Normalized에서 inf값으로 발산하는 것을 막기 위함.            
+        # ## 만약 degree 값이 0인 노드가 하나라도 존재한다면
+        # if tf.not_equal(tf.size(tf.where(tf.squeeze(degree_vec) == 0)), 0):
+        #     target_indices = tf.cast(tf.where(tf.squeeze(degree_vec) == 0), dtype = tf.int32)   # degree = 0인 target_indices
+        #     update_values = tf.expand_dims(tf.repeat(self.degree_factor, tf.shape(target_indices)[0]), axis = 1)
+        #     target_shape = tf.shape(degree_vec)
+        #     update_vec = tf.cast(tf.scatter_nd(target_indices, update_values, target_shape), dtype = tf.float32)
+        #     degree_vec = degree_vec + update_vec
 
         # diagonal_band_mat은 bipartite_adjacency_mat과 같은 형상으로 대각축 요소에는 1값, 그 외 요소에는 0값이 입력되어 있는 대칭행렬
         diagonal_band_mat = tf.linalg.band_part(tf.ones_like(bipartite_adjacency_mat), 0, 0)
@@ -157,6 +253,7 @@ class SignlessLaplacianPropagation(tf.keras.Model):
 
         # 만약 normalized_laplacian이라면
         if normalized == True:
+            
             # degree_vec에 1 / sqrt(node_degree) = 1 / sqrt(|each_node_i|)
             degree_vec = tf.math.rsqrt(degree_vec)
 
@@ -164,7 +261,7 @@ class SignlessLaplacianPropagation(tf.keras.Model):
         bipartite_degree_mat = diagonal_band_mat * degree_vec
         return bipartite_degree_mat
 
-    def laplacian_propagation(self, bipartite_degree_mat, bipartite_adjacency_mat, conv_att_scores):
+    def laplacian_propagation(self, bipartite_degree_mat, bipartite_adjacency_mat, bi_incidence, conv_att_map):
 
         # (1) 이분그래프 라플라시안 (aka Signless Laplacian) 행렬 계산
         ## signless_laplacian_mat의 차원 : (num_node_in_a + num_node_in_b, num_node_in_a + num_node_in_b)
@@ -177,28 +274,47 @@ class SignlessLaplacianPropagation(tf.keras.Model):
         else:
             signless_laplacian_mat = bipartite_degree_mat - bipartite_adjacency_mat
 
-        # (2) 라플라시안 전파 (Signless Laplacian Propagation) 수행
-        ## lap_propagated_out의 차원 : (num_node_in_a + num_node_in_b, sequence_len1, sequence_len2)
-        lap_propagated_out = tf.tensordot(signless_laplacian_mat, conv_att_scores, axes = [[1], [0]])
+        # (2) 무부호 라플라시안 전파 (Signless Laplacian Propagation) 수행
+        # (2-1) 라플라시안 전파1
+        ## lap_propagated_out1의 차원 : (num_node_in_a + num_node_in_b, sequence_len1, sequence_len2)
+        lap_propagated_out1 = tf.tensordot(signless_laplacian_mat, conv_att_map, axes = [[1], [0]])
 
-        return lap_propagated_out, signless_laplacian_mat
-
-    def call(self, a_partition, b_partition, attention_map):
-        # (1) 이분그래프 컨볼루션을 통해 node의 임베딩 텐서 및 bi_incidence 행렬 계산
-        ## conv_att_scores의 차원 : (num_node_in_a + num_node_in_b, sequence_len1, sequence_len2)
+        # (2-2) 라플라시안 전파2
         ## bi_incidence의 차원 : (num_node_in_a + num_node_in_b, batch_size)
-        conv_att_weights, bi_incidence, a_nodeVec, b_nodeVec = self.bgc_operator(a_partition, b_partition, attention_map)
+        ## bi_incidence_T의 차원 : (batch_size, num_node_in_a + num_node_in_b)
+        ## lap_propagated_out2의 차원 : (batch_size, sequence_len1, sequence_len2)
+        bi_incidence_T = tf.cast(tf.transpose(bi_incidence), dtype = tf.float32)
+        lap_propagated_out2 = tf.tensordot(bi_incidence_T, lap_propagated_out1, axes = [[1], [0]])
+
+        return lap_propagated_out2, signless_laplacian_mat
+
+    def call(self, a_node, b_node, attention_map):
+        # a_node : source domain을 구성하는 nodes set
+        # b_node : target domain을 구성하는 nodes set (예. trunc_sample['Ligand SMILES'])
+        ## a_node의 차원 : (batch_size, num_node_in_a)
+        ## b_node의 차원 : (batch_size, num_node_in_b)
+
+        # (1) 이분그래프 컨볼루션을 통해 node의 임베딩 텐서 및 bi_incidence 행렬 계산
+        ## conv_att_map의 차원 : (num_node_in_a + num_node_in_b, sequence_len1, sequence_len2)
+        ## bi_incidence의 차원 : (num_node_in_a + num_node_in_b, batch_size)
+        ## num_a_nodes_per_batch의 차원 : (batch_size, num_node_in_a)
+        ## num_b_nodes_per_batch의 차원 : (batch_size, num_node_in_b)
+        conv_att_weights, bi_incidence, num_a_nodes_per_batch, num_b_nodes_per_batch = self.bgc_operator(a_node, b_node, attention_map)
 
         # (2) 이분그래프 인접행렬 (bipartite_adjacency_mat) 및 이분그래프 차수행렬 (bipartite_degree_mat) 계산
         ## bipartite_adjacency_mat의 차원 : (num_node_in_a + num_node_in_b, num_node_in_a + num_node_in_b)
         ## bipartite_degree_mat의 차원 : (num_node_in_a + num_node_in_b, num_node_in_a + num_node_in_b)
-        bipartite_adjacency_mat = self.bipartite_adjacency_matrix_generator(bi_incidence, a_nodeVec, b_nodeVec, hop = self.hop)    # hop 조절 가능
+        bipartite_adjacency_mat = self.bipartite_adjacency_matrix_generator(bi_incidence, num_a_nodes_per_batch, num_b_nodes_per_batch, hop = self.hop)    # hop 조절 가능
         bipartite_degree_mat = self.bipartite_degree_matrix_generator(bipartite_adjacency_mat, normalized = self.normalized)     # normalize 여부 선택 가능
 
         # (3) 라플라시안 행렬 계산 및 전파 수행
-        lap_propagated_out, signless_laplacian_mat = self.laplacian_propagation(bipartite_degree_mat, bipartite_adjacency_mat, conv_att_weights)
+        ## singless_laplacian_mat : 라플라시안 행렬 
+        # 의 차원 : (num_node_in_a + num_node_in_b, num_node_in_a + num_node_in_b)
+        ## laplace_propagated_map : 라플라시안 전파가 수행된 attention_map
+        # 의 차원 : (num_node_in_a + num_node_in_b, num_node_in_a + num_node_in_b)
+        laplace_propagated_map, signless_laplacian_mat = self.laplacian_propagation(bipartite_degree_mat, bipartite_adjacency_mat, bi_incidence, conv_att_weights)
 
-        return lap_propagated_out
+        return laplace_propagated_map
 
 # 멀티 헤드 어텐션
 class MultiHeadAttention(tf.keras.Model):        
@@ -230,33 +346,37 @@ class MultiHeadAttention(tf.keras.Model):
         x = tf.reshape(x, shape = (batch_size, -1, self.num_heads, self.depth))
         return tf.transpose(x, perm = [0, 2, 1, 3])        
 
-    def scaled_dot_product_attention(self, q, k, v, mask):
+    def scaled_dot_product_attention(self, q, k, v, a_node, b_node, mask):
         
         # attention_map의 차원 : (batch_size, num_heads, sequence_len1, sequence_len2)
         attention_map = tf.matmul(q, k, transpose_b = True)
-        dk = tf.cast(k.shape[1], dtype = tf.float32)
 
         '''
         여기에 SignlessLaplacianPropagation
         '''
         # 만약 SignlessLaplacianPropagation을 사용한다면 if문 안의 연산을 수행
         if self.bgslp == True:
-            attention_map = self.slp()
+            # Graph Convolution & Signeless Laplacian Operation 수행
+            # a_node과 b_node에 해당하는 값이 여기까지 넘어올 수 있어야 함
+            laplace_propagated_map = self.slp(a_node, b_node, attention_map)
+            attention_map = laplace_propagated_map
 
         # scale 적용
+        dk = tf.cast(k.shape[1], dtype = tf.float32)
         attention_logits = attention_map / tf.math.sqrt(dk)
 
         # masking 적용
         if mask is not None:
             attention_logits += mask
 
-        attention_weights = tf.nn.softmax(attention_logits, axis = 3)
+        attention_weights = tf.nn.softmax(attention_logits, axis = -1)
 
         # attention_scores의 차원 : (batch_size, num_heads, sequnece_len1, depth)
         attention_scores = tf.matmul(attention_weights, v)
+
         return attention_scores, attention_weights
 
-    def call(self, query, key, value, mask):
+    def call(self, query, key, value, a_node, b_node, mask):
         # query, key, value는 embedded representation된 문장 데이터들이다.
         # mask는 미리 뽑아서 여기까지 계속 전달해주어야 함.
 
@@ -273,7 +393,7 @@ class MultiHeadAttention(tf.keras.Model):
 
         # scaled_dot_product_attention 적용해주기
         # scaled_attention_scores의 차원: (batch_size, num_heads, sequence_len1, depth)
-        scaled_attention_scores, attention_weights = self.scaled_dot_product_attention(q, k, v, mask)
+        scaled_attention_scores, attention_weights = self.scaled_dot_product_attention(q, k, v, a_node, b_node, mask)
 
         # self-attention output의 multi head들을 concat해주기
         scaled_attention_scores = tf.transpose(scaled_attention_scores, perm = [0, 2, 1, 3])
@@ -316,8 +436,8 @@ class EncoderLayer(tf.keras.Model):
         self.dropout2 = tf.keras.layers.Dropout(rate = kwargs['dropout_rate'])
         self.normalization2 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
 
-    def call(self, x, mask):
-        mha_outputs, _ = self.mha(x, x, x, mask)
+    def call(self, x, a_node, mask):
+        mha_outputs, _ = self.mha(x, x, x, a_node, a_node, mask)
         mha_outputs = self.dropout1(mha_outputs) + x
         out1 = self.normalization1(mha_outputs)
 
@@ -344,14 +464,14 @@ class DecoderLayer(tf.keras.Model):
         self.normalization2 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
         self.normalization3 = tf.keras.layers.LayerNormalization(epsilon = 1e-5)
 
-    def call(self, enc_x, x, dec_pad_mask, dec_subseq_mask):
+    def call(self, enc_x, x, a_node, b_node, dec_pad_mask, dec_subseq_mask):
         # within-domain self-attention 파트
-        mha_outputs1, attn_weights1 = self.mha1(x, x, x, dec_subseq_mask)
+        mha_outputs1, attn_weights1 = self.mha1(x, x, x, b_node, b_node, dec_subseq_mask)
         mha_outputs1 = self.dropout1(mha_outputs1) + x
         out1 = self.normalization1(mha_outputs1)
 
         # cross-domain attention 파트
-        mha_outputs2, attn_weights2 = self.mha2(out1, enc_x, enc_x, dec_pad_mask)
+        mha_outputs2, attn_weights2 = self.mha2(out1, enc_x, enc_x, a_node, b_node, dec_pad_mask)
         mha_outputs2 = self.dropout2(mha_outputs2) + out1
         out2 =  self.normalization2(mha_outputs2)
 
@@ -377,7 +497,7 @@ class Encoder(tf.keras.Model):
 
         self.stacked_enc_layers = [self.encoder_layer for i in range(self.num_layers)]
 
-    def call(self, inputs, enc_pad_mask):
+    def call(self, inputs, a_node, enc_pad_mask):
         embeddings = self.embedding_layer(inputs)
         embeddings *= tf.math.sqrt(tf.cast(self.d_model, dtype = tf.float32))
 
@@ -385,7 +505,7 @@ class Encoder(tf.keras.Model):
         x = embeddings + pos
 
         for enc_layer in self.stacked_enc_layers:
-            x = enc_layer(x, enc_pad_mask)
+            x = enc_layer(x, a_node, enc_pad_mask)
 
         return x
 
@@ -404,7 +524,7 @@ class Decoder(tf.keras.Model):
         self.stacked_dec_layers = [self.decoder_layer for i in range(self.num_layers)]
 
 
-    def call(self, enc_x, outputs, dec_pad_mask, dec_seq_mask):
+    def call(self, enc_x, outputs, a_node, b_node, dec_pad_mask, dec_seq_mask):
         attn_weights_dict = {}
         
         embeddings = self.embedding_layer(outputs)
@@ -414,7 +534,7 @@ class Decoder(tf.keras.Model):
         x = embeddings + pos
 
         for i, dec_layer in enumerate(self.stacked_dec_layers):
-            x, attn_w1, attn_w2 = dec_layer(enc_x, x, dec_pad_mask, dec_seq_mask)
+            x, attn_w1, attn_w2 = dec_layer(enc_x, x, a_node, b_node, dec_pad_mask, dec_seq_mask)
             attn_weights_dict['decoder_layer{}_attn_block1'.format(i+1)] = attn_w1
             attn_weights_dict['decoder_layer{}_attn_block2'.format(i+1)] = attn_w2
 
@@ -427,6 +547,8 @@ class Transformer(tf.keras.Model):
         
         self.maxlen = kwargs['maximum_position_encoding']
         self.end_token_idx = kwargs['end_token_index']
+        self.a_dict = kwargs['a_dict']
+        self.b_dict = kwargs['b_dict']
 
         self.mask_generator = Mask_Generator(**kwargs)
 
@@ -439,47 +561,59 @@ class Transformer(tf.keras.Model):
 
         self.linear_layer = tf.keras.layers.Dense(units = kwargs['target_vocab_size'])
 
-    def call(self, x):
+    def call(self, data):
         '''
-        inputs : protein sequences (FASTA)
-        input_codes : protein code
-        outputs : compound sequences (SMILES)
-        outputs_codes : compound code
+        inputs : citing articles / protein sequences (FASTA)
+        outputs : cited articles / compound sequences (SMILES)
+        a_code : nodes in a partition (node of input domain; a_node)
+        b_code : nodes in b partition (node of output domain; b_node)
         '''
-        inputs, outputs, input_codes, output_codes = x
 
+        # a_code & b_code의 차원 : (batch_size, num_nodes)
+        inputs, a_node, b_node, outputs = data
+        
         enc_pad_mask, dec_pad_mask, dec_subseq_mask = self.mask_generator(inputs, outputs)
-        enc_outputs = self.encoder(inputs, enc_pad_mask)
-        dec_outputs, attention_weights = self.decoder(enc_outputs, outputs, dec_pad_mask, dec_subseq_mask)
+        enc_outputs = self.encoder(inputs, a_node, enc_pad_mask)
+        dec_outputs, attention_weights = self.decoder(enc_outputs, outputs, a_node, b_node, dec_pad_mask, dec_subseq_mask)
         final_outputs = self.linear_layer(dec_outputs)
         
         return final_outputs
 
-    def inference(self, inputs):
+    def inference(self, data):
 
-        # 시작토큰으로 outputs 만들어주기. outputs의 크기는 (batch_size, 1)
+        inputs, a_node, b_node, outputs = data
+
+        # (1) 시작토큰 ('<bos>')으로 decoder에 활용될 outputs 벡터 생성. 
+        ## outputs의 크기는 (batch_size, 1)
         batch_size = inputs.shape[0]
-        outputs = tf.expand_dims([compound_dict['<bos>']] * batch_size, 1)
+        outputs = tf.expand_dims([self.b_dict['<bos>']] * batch_size, 1)
 
-        # 초기 mask 생성
+        # (2) 초기 mask 생성
+        ## enc_pad_mask, dec_subseq_mask : 각각 encoder, decoder에 대한 self-attention용 mask
+        ## dec_pad_mask : encoder와 decoder의 토큰들 간 attention용 mask
         enc_pad_mask, dec_pad_mask, dec_subseq_mask = self.mask_generator(inputs, outputs)
-        enc_outputs = self.encoder(inputs, enc_pad_mask)
+
+        # (3) inputs값을 encoder에 통과시킨 임베딩 행렬인 enc_outputs 생성
+        enc_outputs = self.encoder(inputs, a_node, enc_pad_mask)
         
-        # 예측토큰을 담을 리스트 정의
+        # (4) 예측토큰을 담을 리스트 정의
+        ## 시작 토큰 ('<bos>')으로 구성됨
         predict_tokens = outputs
 
         # ㅇㅇ
         fin_seq_idx = np.array([])
 
 
-        # 예측한 토큰을 활용하여 다음 토큰 예측하기 위해 for문 돌리기
+        # (5) 앞서 예측한 토큰을 활용하여 다음 토큰을 예측하는 과정
         ## for문 최대길이는 target 시퀀스의 최대길이
         for t in range(0, self.maxlen):
 
-            dec_outputs, _ = self.decoder(enc_outputs, outputs, dec_pad_mask, dec_subseq_mask)
+            # enc_outputs, 이전 iter에서 예측된 outputs, node 행렬, mask 행렬을 decoder의 입력으로 활용하여 현재 iter에서의 임베딩 행렬 dec_outputs 예측
+            dec_outputs, _ = self.decoder(enc_outputs, outputs, a_node, b_node, dec_pad_mask, dec_subseq_mask)
             final_outputs = self.linear_layer(dec_outputs)
 
             # logit이 크면 확률도 크니까 그냥 final_outputs에서 argmax해주기
+            ## 여기서 다양한 sequence_generation algorithm을 구현하기
             maxlogit_tokens = tf.argmax(final_outputs, -1).numpy()
             pred_token = tf.cast(tf.expand_dims(maxlogit_tokens[:, -1], 1), dtype = tf.int32)
 
@@ -511,22 +645,23 @@ class Transformer(tf.keras.Model):
 model = Transformer(**kwargs)
 cp = Compile_Params(**kwargs)
 model.compile(optimizer = cp.optimizer, loss = cp.loss, metrics = [cp.accuracy])
-# histories = model.fit([padded_FASTA[30:60, :], padded_SMILES[30:60, :padded_SMILES.shape[1]-1]], padded_SMILES[30:60, 1:], batch_size = 1, epochs = 1000)
+# histories = model.fit([padded_FASTA[:30, :], padded_SMILES[:30, :padded_SMILES.shape[1]-1]], padded_SMILES[:30, 1:], batch_size = 1, epochs = 1000)
 # histories = model.fit([padded_FASTA[:256 ,:], padded_SMILES[:256, :padded_SMILES.shape[1]-1]], padded_SMILES[:256, 1:], batch_size = 32, epochs = 1000)
-histories = model.fit([padded_FASTA[30:60, :], padded_SMILES[30:60, :padded_SMILES.shape[1]-1], padded_SMILES[30:60, 1:], trunc_sample_data['FASTA Category'], trunc_sample_data['SMILES Category']], batch_size = kwargs['batch_size'], epochs = 1000)
+histories = model.fit([a_sequence[:640, :], a_code[:640, :], b_code[:640, :], b_sequence[:640, :b_sequence.shape[1]-1]], b_sequence[:640, 1:], batch_size = kwargs['batch_size'], epochs = 1000)
 
 # %%
 # inference가 상식적으로 동작하도록 만들어야 함.
 # 왜 model.predict는 잘되는데 model.inference는 잘 안될까?
 # ttt = model.inference(padded_FASTA)
-ttt = model.inference(padded_FASTA[30:60, :])
-np.vectorize(compound_dict_reverse.get)(ttt)[0]
+ttt = model.inference([a_sequence[:64, :], a_code[:64, :], b_code[:64, :], b_sequence[:64, :b_sequence.shape[1]-1]])
+np.vectorize(dict(map(reversed, b_dict.items())).get)(ttt.numpy())
 
 # %%
 tf.nn.softmax(model.predict([padded_FASTA[:32, :], padded_SMILES[:32, :padded_SMILES.shape[1] - 1]]), axis = 2)
 tf.math.argmax(tf.nn.softmax(model.predict([padded_FASTA[:32, :], padded_SMILES[:32, :padded_SMILES.shape[1] - 1]]), axis = 2)[:, :, :], axis = 2)
 
 
+tf.math.argmax(tf.nn.softmax(model.predict([a_sequence[:100, :], a_code[:100, :], b_code[:100, :], b_sequence[:100, :b_sequence.shape[1]-1]]), axis = 2)), axis = 2)[:, :, :], axis = 2)
 
 # %%
 no_train_model = Transformer(**kwargs)
@@ -536,8 +671,8 @@ tf.expand_dims([compound_dict['<bos>']] + [compound_dict['pad']] * 43, 0)
 
 # %%
 # 변환하는 것
-tmp = tf.math.argmax(tf.nn.softmax(model.predict([padded_FASTA[:32, :], padded_SMILES[:32, :padded_SMILES.shape[1] - 1]]), axis = 2)[:, :, :], axis = 2)
-np.vectorize(compound_dict_reverse.get)(tmp)
+tmp = tf.math.argmax(tf.nn.softmax(model.predict([a_sequence[:32, :], b_sequence[:32, :b_sequence.shape[1] - 1]]), axis = 2)[:, :, :], axis = 2)
+np.vectorize(a_dict.get)(tmp)
 
 
 
