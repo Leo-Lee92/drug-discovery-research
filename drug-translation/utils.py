@@ -23,7 +23,8 @@ def data_loader(data_address, task = "generation"):
 
 # 시퀀스 길이 기반 데이터 절삭기
 '''
-truncate_rate (절삭률) : 시퀀스 길이 상위 truncate_rate (%) 파라미터; 시퀀스 길이 상위 truncate_rate (%) 이상인 시퀀스들은 절삭
+truncate_rate (절삭률) : 시퀀스 길이 상위 truncate_rate (%) 파라미터; 
+시퀀스 길이 상위 truncate_rate (%) 이상인 시퀀스들은 절삭 (제거)
 '''
 def len_based_truncation(sample_data, truncate_rate = 0.2):
 
@@ -32,14 +33,14 @@ def len_based_truncation(sample_data, truncate_rate = 0.2):
   protein_len_distribution = sample_data.apply(lambda x : len(x['BindingDB Target Chain Sequence']), axis = 1)
   compound_len_distribution = sample_data.apply(lambda x : len(x['Ligand SMILES']), axis = 1)
 
-  # (2-1) 단백질의 경우 소수의 너무 긴 단백질이 존재하므로 길이 하위 80% 까지만 고려.
+  # (2-1) 단백질의 경우 소수의 너무 긴 단백질이 존재하므로 길이 하위 1 - truncate_rate (%) 까지만 고려.
   protein_quantile = protein_len_distribution.quantile(1 - truncate_rate)
   truncated_protein_len_distribution = protein_len_distribution[protein_len_distribution.lt(protein_quantile)]
 
-  # (2-2) protein sequence는 길이 하위 80%에 해당하는 샘플만 고려하는 truncated_data 만들어주기
+  # (2-2) protein sequence는 길이 하위 1 - truncate_rate (%) 에 해당하는 샘플만 고려하는 truncated_data 만들어주기
   truncated_data = sample_data[protein_len_distribution.lt(protein_quantile)]
 
-  return truncated_data
+  return truncated_data, protein_len_distribution, truncated_protein_len_distribution, compound_len_distribution
 
 # 노드 생성기
 '''
@@ -49,18 +50,18 @@ def node_generation(truncated_data, task = "generation"):
 
   # A 파티션과 B 파티션 내 노드들의 카테고리 변수 추출후 해당 컬럼 추가
   if task == "generation":
-    truncated_data['A_Partition_Category'] = np.array([str('P') + str(i) for i in pd.factorize(truncated_data.iloc[:, 0])[0].tolist()])
-    truncated_data['B_Partition_Category'] = np.array([str('C') + str(i) for i in pd.factorize(truncated_data.iloc[:, 1])[0].tolist()])
+    truncated_data.loc[:, 'A_Partition_Category'] = np.array([str('P') + str(i) for i in pd.factorize(truncated_data.iloc[:, 0])[0].tolist()])
+    truncated_data.loc[:, 'B_Partition_Category'] = np.array([str('C') + str(i) for i in pd.factorize(truncated_data.iloc[:, 1])[0].tolist()])
   elif task == "recommendation":
-    truncated_data['A_Partition_Category'] = np.array([str('From') + str(i) for i in pd.factorize(truncated_data.iloc[:, 0])[0].tolist()])
-    truncated_data['B_Partition_Category'] = np.array([str('To') + str(i) for i in pd.factorize(truncated_data.iloc[:, 1])[0].tolist()])
+    truncated_data.loc[:, 'A_Partition_Category'] = np.array([str('From') + str(i) for i in pd.factorize(truncated_data.iloc[:, 0])[0].tolist()])
+    truncated_data.loc[:, 'B_Partition_Category'] = np.array([str('To') + str(i) for i in pd.factorize(truncated_data.iloc[:, 1])[0].tolist()])
 
   # A 파티션과 B 파티션 내 노드들의 코드 변수 추출후 해당 컬럼 추가
   a_code = pd.factorize(truncated_data.iloc[:, 0])[0]
   b_code = pd.factorize(truncated_data.iloc[:, 1])[0]
-  truncated_data['A_Partition_Code'] = a_code.tolist()
-  truncated_data['B_Partition_Code'] = b_code.tolist()
-  truncated_data['Connection'] = 1
+  truncated_data.loc[:, 'A_Partition_Code'] = a_code.tolist()
+  truncated_data.loc[:, 'B_Partition_Code'] = b_code.tolist()
+  truncated_data.loc[:, 'Connection'] = 1
 
   # 코드 변수 원핫 임베딩
   a_code_onehot = tf.one_hot(a_code, depth = np.max(a_code) + 1)
@@ -111,7 +112,7 @@ def data_tokenizer(truncated_data):
 '''
 -- (2) EDA 용 utils
 '''
-def check_node_num(a_sequence, b_sequence, task = "generation"):
+def check_node_num(a_sequence, b_sequence, truncated_data, task = "generation"):
     _, unique_nodes_A = np.unique(a_sequence, axis = 0, return_counts = True)
     _, unique_nodes_B = np.unique(b_sequence, axis = 0, return_counts = True)
   
@@ -251,10 +252,10 @@ def plot_graphs(history, string):
     plt.show()
 
 # %%
-import matplotlib.pyplot as plt
-# 포지션 인코딩 마스크 플롯
-plt.pcolormesh(tf.transpose(tf.squeeze(pos_encoding)), cmap='RdBu')
-plt.ylabel('Depth')
-plt.xlabel('Position')
-plt.colorbar()
-plt.show()
+# import matplotlib.pyplot as plt
+# # 포지션 인코딩 마스크 플롯
+# plt.pcolormesh(tf.transpose(tf.squeeze(pos_encoding)), cmap='RdBu')
+# plt.ylabel('Depth')
+# plt.xlabel('Position')
+# plt.colorbar()
+# plt.show()

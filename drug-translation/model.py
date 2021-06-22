@@ -318,7 +318,7 @@ class SignlessLaplacianPropagation(tf.keras.Model):
 
 # 멀티 헤드 어텐션
 class MultiHeadAttention(tf.keras.Model):        
-    def __init__(self, **kwarg):
+    def __init__(self, **kwargs):
         super().__init__(self)
 
         # 하이퍼 파라미터 정의
